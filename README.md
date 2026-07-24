@@ -78,6 +78,21 @@ En los logs aparecerá una URL similar a
 `https://nombre-aleatorio.trycloudflare.com`. Comparte únicamente esa URL.
 El portátil y Docker deben permanecer encendidos.
 
+Para consultar la URL actual sin revisar los logs, ejecuta:
+
+```powershell
+.\Get-PublicUrl.ps1
+```
+
+Y para abrirla directamente en el navegador:
+
+```powershell
+.\Get-PublicUrl.ps1 -Open
+```
+
+La URL no se guarda automáticamente en el README: Cloudflare la cambia al
+reiniciar el túnel y hacerlo generaría modificaciones de Git innecesarias.
+
 Para apagar la demo:
 
 ```powershell

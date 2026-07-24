@@ -68,6 +68,19 @@ class GrantWithUserOut(GrantOut):
     user: UserOut
 
 
+class SharedMaterialOut(BaseModel):
+    id: int
+    title: str
+    filename: str
+    kind: str
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class GrantWithMaterialOut(GrantOut):
+    material: SharedMaterialOut
+
+
 class FolderCreate(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     parent_id: int | None = None

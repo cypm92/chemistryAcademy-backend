@@ -174,6 +174,25 @@ def material_data(material: models.Material) -> dict:
     }
 
 
+@app.get("/admin/users/{user_id}/grants", response_model=list[schemas.GrantWithMaterialOut])
+def user_grants(user_id: int, _: models.User = Depends(admin_user), db: Session = Depends(get_db)):
+    if not db.get(models.User, user_id):
+        raise HTTPException(404, "Usuario no encontrado")
+    rows = db.execute(
+        select(models.AccessGrant, models.Material)
+        .join(models.Material, models.Material.id == models.AccessGrant.material_id)
+        .where(models.AccessGrant.user_id == user_id)
+        .order_by(models.AccessGrant.expires_at)
+    ).all()
+    return [
+        {
+            **schemas.GrantOut.model_validate(grant).model_dump(),
+            "material": {"id": material.id, "title": material.title, "filename": material.filename, "kind": material.kind},
+        }
+        for grant, material in rows
+    ]
+
+
 @app.get("/admin/folders", response_model=list[schemas.FolderOut])
 def all_folders(_: models.User = Depends(admin_user), db: Session = Depends(get_db)):
     folders = list(db.scalars(select(models.Folder).order_by(models.Folder.name)))
