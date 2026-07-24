@@ -5,7 +5,7 @@ from pathlib import Path
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response, StreamingResponse
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from . import models, schemas
@@ -33,10 +33,22 @@ def seed_admin() -> None:
         db.commit()
 
 
+def ensure_default_folder() -> None:
+    with SessionLocal() as db:
+        existing = db.scalar(select(models.Folder).where(
+            models.Folder.name == "Sin clasificar",
+            models.Folder.parent_id.is_(None),
+        ))
+        if not existing:
+            db.add(models.Folder(name="Sin clasificar"))
+            db.commit()
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     Base.metadata.create_all(engine)
     seed_admin()
+    ensure_default_folder()
     yield
 
 
@@ -89,6 +101,104 @@ def create_user(data: schemas.AdminUserCreate, _: models.User = Depends(admin_us
     return user
 
 
+@app.patch("/admin/users/{user_id}", response_model=schemas.UserOut)
+def update_user(user_id: int, data: schemas.AdminUserUpdate, admin: models.User = Depends(admin_user),
+                db: Session = Depends(get_db)):
+    user = db.get(models.User, user_id)
+    if not user:
+        raise HTTPException(404, "Usuario no encontrado")
+    changes = data.model_dump(exclude_unset=True)
+    if "role" in changes and changes["role"] not in {"guest", "admin"}:
+        raise HTTPException(400, "Rol no válido")
+    if "email" in changes:
+        email = changes["email"].lower()
+        duplicate = db.scalar(select(models.User).where(models.User.email == email, models.User.id != user_id))
+        if duplicate:
+            raise HTTPException(400, "El email ya está registrado")
+        user.email = email
+    if "name" in changes:
+        user.name = changes["name"]
+    if "password" in changes:
+        user.password_hash = hash_password(changes["password"])
+    if "is_active" in changes:
+        if user.id == admin.id and not changes["is_active"]:
+            raise HTTPException(400, "No puedes desactivar tu propia cuenta")
+        user.is_active = changes["is_active"]
+    if "role" in changes:
+        if user.id == admin.id and changes["role"] != "admin":
+            raise HTTPException(400, "No puedes retirar tu propio rol de administrador")
+        user.role = changes["role"]
+    db.commit(); db.refresh(user)
+    return user
+
+
+@app.delete("/admin/users/{user_id}", status_code=204)
+def delete_user(user_id: int, admin: models.User = Depends(admin_user), db: Session = Depends(get_db)):
+    user = db.get(models.User, user_id)
+    if not user:
+        raise HTTPException(404, "Usuario no encontrado")
+    if user.id == admin.id:
+        raise HTTPException(400, "No puedes eliminar tu propia cuenta")
+    if user.role == "admin":
+        raise HTTPException(400, "No se pueden eliminar cuentas de administrador")
+    db.execute(delete(models.AccessGrant).where(models.AccessGrant.user_id == user_id))
+    db.delete(user)
+    db.commit()
+
+
+def folder_path(folder: models.Folder) -> str:
+    names = [folder.name]
+    current = folder.parent
+    while current:
+        names.append(current.name)
+        current = current.parent
+    return " / ".join(reversed(names))
+
+
+def material_data(material: models.Material) -> dict:
+    """Serialize a material including the computed path of its folder."""
+    folder = material.folder
+    return {
+        "id": material.id,
+        "title": material.title,
+        "description": material.description,
+        "folder": (
+            {"id": folder.id, "name": folder.name, "parent_id": folder.parent_id,
+             "path": folder_path(folder)}
+            if folder else None
+        ),
+        "kind": material.kind,
+        "filename": material.filename,
+        "content_type": material.content_type,
+        "size_bytes": material.size_bytes,
+    }
+
+
+@app.get("/admin/folders", response_model=list[schemas.FolderOut])
+def all_folders(_: models.User = Depends(admin_user), db: Session = Depends(get_db)):
+    folders = list(db.scalars(select(models.Folder).order_by(models.Folder.name)))
+    return [{"id": folder.id, "name": folder.name, "parent_id": folder.parent_id, "path": folder_path(folder)}
+            for folder in folders]
+
+
+@app.post("/admin/folders", response_model=schemas.FolderOut, status_code=201)
+def create_folder(data: schemas.FolderCreate, _: models.User = Depends(admin_user), db: Session = Depends(get_db)):
+    name = data.name.strip()
+    if not name:
+        raise HTTPException(400, "El nombre de la carpeta es obligatorio")
+    if data.parent_id is not None and not db.get(models.Folder, data.parent_id):
+        raise HTTPException(404, "La carpeta padre no existe")
+    duplicate = db.scalar(select(models.Folder).where(
+        models.Folder.name == name,
+        models.Folder.parent_id == data.parent_id if data.parent_id is not None else models.Folder.parent_id.is_(None),
+    ))
+    if duplicate:
+        raise HTTPException(400, "Ya existe una carpeta con ese nombre en esa ubicación")
+    folder = models.Folder(name=name, parent_id=data.parent_id)
+    db.add(folder); db.commit(); db.refresh(folder)
+    return {"id": folder.id, "name": folder.name, "parent_id": folder.parent_id, "path": folder_path(folder)}
+
+
 @app.get("/admin/materials", response_model=list[schemas.AdminMaterialOut])
 def all_materials(_: models.User = Depends(admin_user), db: Session = Depends(get_db)):
     now = datetime.now(timezone.utc)
@@ -101,14 +211,14 @@ def all_materials(_: models.User = Depends(admin_user), db: Session = Depends(ge
             models.AccessGrant.expires_at > now,
         ).order_by(models.AccessGrant.expires_at)))
         result.append({
-            **schemas.MaterialOut.model_validate(material).model_dump(),
+            **material_data(material),
             "grants": grants,
         })
     return result
 
 
 @app.post("/admin/materials", response_model=schemas.MaterialOut, status_code=201)
-async def upload_material(title: str = Form(...), description: str = Form(""),
+async def upload_material(title: str = Form(...), description: str = Form(""), folder_id: int = Form(...),
                           file: UploadFile = File(...), _: models.User = Depends(admin_user),
                           db: Session = Depends(get_db)):
     content_type = (file.content_type or "").lower()
@@ -119,12 +229,27 @@ async def upload_material(title: str = Form(...), description: str = Form(""),
         kind = "video"
     else:
         raise HTTPException(400, "Sólo se admiten PDF y vídeos")
+    folder = db.get(models.Folder, folder_id)
+    if not folder:
+        raise HTTPException(404, "La carpeta seleccionada no existe")
     key, size = await storage.save(file)
-    material = models.Material(title=title, description=description, kind=kind,
+    material = models.Material(title=title, description=description, folder_id=folder.id, kind=kind,
                                filename=file.filename or key, storage_key=key,
                                content_type=content_type, size_bytes=size)
     db.add(material); db.commit(); db.refresh(material)
-    return material
+    return material_data(material)
+
+
+@app.delete("/admin/materials/{material_id}", status_code=204)
+def delete_material(material_id: int, _: models.User = Depends(admin_user), db: Session = Depends(get_db)):
+    material = db.get(models.Material, material_id)
+    if not material:
+        raise HTTPException(404, "Material no encontrado")
+    storage_key = material.storage_key
+    db.execute(delete(models.AccessGrant).where(models.AccessGrant.material_id == material_id))
+    db.delete(material)
+    db.commit()
+    storage.delete(storage_key)
 
 
 @app.post("/admin/grants", response_model=schemas.GrantOut)
@@ -176,7 +301,7 @@ def my_materials(user: models.User = Depends(current_user), db: Session = Depend
         materials = db.scalars(select(models.Material).order_by(models.Material.created_at.desc())).all()
         return [
             {
-                **schemas.MaterialOut.model_validate(material).model_dump(),
+                **material_data(material),
                 "expires_at": None,
                 "can_download": True,
             }
@@ -187,7 +312,7 @@ def my_materials(user: models.User = Depends(current_user), db: Session = Depend
         models.AccessGrant.user_id == user.id,
         models.AccessGrant.starts_at <= now,
         models.AccessGrant.expires_at > now).order_by(models.Material.created_at.desc())).all()
-    return [{**schemas.MaterialOut.model_validate(material).model_dump(),
+    return [{**material_data(material),
              "expires_at": grant.expires_at, "can_download": grant.can_download}
             for material, grant in rows]
 

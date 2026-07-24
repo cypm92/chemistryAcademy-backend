@@ -28,6 +28,10 @@ class LocalStorage:
             raise ValueError("Ruta de almacenamiento no válida")
         return candidate
 
+    def delete(self, key: str) -> None:
+        path = self.path(key)
+        if path.exists():
+            path.unlink()
+
 
 storage = LocalStorage()
-

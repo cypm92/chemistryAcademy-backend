@@ -13,6 +13,14 @@ class AdminUserCreate(UserCreate):
     role: str = "guest"
 
 
+class AdminUserUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=2, max_length=120)
+    email: EmailStr | None = None
+    password: str | None = Field(default=None, min_length=8, max_length=128)
+    role: str | None = None
+    is_active: bool | None = None
+
+
 class LoginRequest(BaseModel):
     email: EmailStr
     password: str
@@ -60,10 +68,23 @@ class GrantWithUserOut(GrantOut):
     user: UserOut
 
 
+class FolderCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    parent_id: int | None = None
+
+
+class FolderOut(BaseModel):
+    id: int
+    name: str
+    parent_id: int | None
+    path: str
+
+
 class MaterialOut(BaseModel):
     id: int
     title: str
     description: str
+    folder: FolderOut | None = None
     kind: str
     filename: str
     content_type: str
