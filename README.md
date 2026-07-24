@@ -62,6 +62,31 @@ docker compose logs -f
 `docker compose down -v` también elimina la base de datos y todos los archivos
 subidos. Úsalo únicamente si quieres reiniciar completamente el entorno local.
 
+### Compartir una demo temporal por Internet
+
+Cloudflare Quick Tunnel permite compartir la aplicación sin abrir puertos del
+router ni contratar un dominio. Está pensado exclusivamente para pruebas.
+
+Desde `backend`, arranca la aplicación y el túnel:
+
+```powershell
+docker compose --profile demo up -d --build
+docker compose logs -f tunnel
+```
+
+En los logs aparecerá una URL similar a
+`https://nombre-aleatorio.trycloudflare.com`. Comparte únicamente esa URL.
+El portátil y Docker deben permanecer encendidos.
+
+Para apagar la demo:
+
+```powershell
+docker compose --profile demo down
+```
+
+La URL deja de funcionar inmediatamente y será distinta en el siguiente
+arranque.
+
 ### Opción manual desde VS Code
 
 Requisitos: Python 3.11+ y Node 20+.

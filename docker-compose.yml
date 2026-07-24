@@ -24,11 +24,11 @@ services:
     restart: unless-stopped
     environment:
       DATABASE_URL: postgresql+psycopg2://chemistry:chemistry@db:5432/chemistry_academy
-      SECRET_KEY: local-only-change-this-secret-before-production
+      SECRET_KEY: ${SECRET_KEY:?Define SECRET_KEY in backend/.env}
       ACCESS_TOKEN_EXPIRE_MINUTES: 480
       ADMIN_NAME: Administradora
       ADMIN_EMAIL: admin@chemistry-academy.com
-      ADMIN_PASSWORD: ChangeMe123!
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Define ADMIN_PASSWORD in backend/.env}
       STORAGE_DIR: /app/storage
       CORS_ORIGINS: http://localhost:${CHEMISTRY_FRONTEND_PORT:-8081},http://127.0.0.1:${CHEMISTRY_FRONTEND_PORT:-8081}
     volumes:
@@ -48,6 +48,15 @@ services:
       - "${CHEMISTRY_FRONTEND_PORT:-8081}:80"
     depends_on:
       - backend
+
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    container_name: chemistryacademy_tunnel
+    profiles: ["demo"]
+    restart: unless-stopped
+    command: tunnel --no-autoupdate --url http://frontend:80
+    depends_on:
+      - frontend
 
 volumes:
   chemistry_db:
