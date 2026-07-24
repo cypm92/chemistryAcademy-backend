@@ -1,0 +1,52 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: chemistryacademy_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: chemistry
+      POSTGRES_PASSWORD: chemistry
+      POSTGRES_DB: chemistry_academy
+    volumes:
+      - chemistry_db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U chemistry -d chemistry_academy"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    container_name: chemistryacademy_backend
+    build:
+      context: .
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql+psycopg2://chemistry:chemistry@db:5432/chemistry_academy
+      SECRET_KEY: local-only-change-this-secret-before-production
+      ACCESS_TOKEN_EXPIRE_MINUTES: 480
+      ADMIN_NAME: Administradora
+      ADMIN_EMAIL: admin@chemistry-academy.com
+      ADMIN_PASSWORD: ChangeMe123!
+      STORAGE_DIR: /app/storage
+      CORS_ORIGINS: http://localhost:${CHEMISTRY_FRONTEND_PORT:-8081},http://127.0.0.1:${CHEMISTRY_FRONTEND_PORT:-8081}
+    volumes:
+      - chemistry_files:/app/storage
+    ports:
+      - "${CHEMISTRY_BACKEND_PORT:-8001}:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  frontend:
+    container_name: chemistryacademy_frontend
+    build:
+      context: ../frontend
+    restart: unless-stopped
+    ports:
+      - "${CHEMISTRY_FRONTEND_PORT:-8081}:80"
+    depends_on:
+      - backend
+
+volumes:
+  chemistry_db:
+  chemistry_files:

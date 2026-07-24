@@ -1,0 +1,6 @@
+.venv/
+.env
+academy.db
+storage/
+__pycache__/
+*.pyc
