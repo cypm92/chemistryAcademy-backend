@@ -21,6 +21,13 @@ class AdminUserUpdate(BaseModel):
     is_active: bool | None = None
 
 
+class ProfileUpdate(BaseModel):
+    name: str = Field(min_length=2, max_length=120)
+    email: EmailStr
+    current_password: str | None = Field(default=None, min_length=8, max_length=128)
+    new_password: str | None = Field(default=None, min_length=8, max_length=128)
+
+
 class LoginRequest(BaseModel):
     email: EmailStr
     password: str
@@ -32,6 +39,7 @@ class UserOut(BaseModel):
     email: EmailStr
     role: str
     is_active: bool
+    has_avatar: bool
     model_config = ConfigDict(from_attributes=True)
 
 
@@ -64,6 +72,20 @@ class GrantUpdate(BaseModel):
     can_download: bool | None = None
 
 
+class TagOut(BaseModel):
+    id: int
+    name: str
+    model_config = ConfigDict(from_attributes=True)
+
+
+class TagGrantCreate(BaseModel):
+    user_id: int
+    tag_id: int
+    starts_at: datetime | None = None
+    expires_at: datetime
+    can_download: bool = False
+
+
 class GrantWithUserOut(GrantOut):
     user: UserOut
 
@@ -86,6 +108,11 @@ class FolderCreate(BaseModel):
     parent_id: int | None = None
 
 
+class FolderUpdate(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    parent_id: int | None = None
+
+
 class FolderOut(BaseModel):
     id: int
     name: str
@@ -104,8 +131,80 @@ class MaterialOut(BaseModel):
     size_bytes: int
     expires_at: datetime | None = None
     can_download: bool = False
+    tags: list[TagOut] = []
+    is_favorite: bool = False
     model_config = ConfigDict(from_attributes=True)
 
 
 class AdminMaterialOut(MaterialOut):
     grants: list[GrantWithUserOut] = []
+
+
+class BookingCreate(BaseModel):
+    starts_at: datetime
+    subject: str = Field(min_length=3, max_length=100)
+    duration_slots: int = Field(ge=1, le=4)
+
+
+class BookingBlockCreate(BaseModel):
+    starts_at: datetime
+    ends_at: datetime
+    status: str
+    note: str = Field(default="", max_length=300)
+
+
+class AdminBookingCreate(BaseModel):
+    user_id: int
+    starts_at: datetime
+    subject: str = Field(min_length=3, max_length=100)
+    duration_slots: int = Field(ge=1, le=4)
+    admin_comment: str = Field(default="", max_length=1000)
+
+
+class AdminClassUpdate(BaseModel):
+    starts_at: datetime
+    duration_slots: int = Field(ge=1, le=4)
+    subject: str = Field(min_length=3, max_length=100)
+    admin_comment: str = Field(default="", max_length=1000)
+
+
+class BookingStatusUpdate(BaseModel):
+    status: str
+
+
+class ClassHistoricalUpdate(BaseModel):
+    is_historical: bool
+
+
+class BookingOut(BaseModel):
+    id: int
+    starts_at: datetime
+    ends_at: datetime
+    status: str
+    note: str = ""
+    admin_comment: str = ""
+    user_id: int | None = None
+    user_name: str | None = None
+    is_mine: bool = False
+
+
+class BookingRequestOut(BookingOut):
+    user_email: EmailStr | None = None
+
+
+class BookingMaterialCreate(BaseModel):
+    material_id: int
+
+
+class ClassOut(BaseModel):
+    id: int
+    starts_at: datetime
+    ends_at: datetime
+    status: str
+    is_historical: bool = False
+    topic: str
+    admin_comment: str = ""
+    user_id: int
+    user_name: str
+    user_email: EmailStr
+    materials: list[SharedMaterialOut] = []
