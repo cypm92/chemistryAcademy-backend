@@ -106,11 +106,13 @@ class GrantWithMaterialOut(GrantOut):
 class FolderCreate(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     parent_id: int | None = None
+    color: str | None = Field(default=None, pattern=r"^#[0-9A-Fa-f]{6}$")
 
 
 class FolderUpdate(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     parent_id: int | None = None
+    color: str | None = Field(default=None, pattern=r"^#[0-9A-Fa-f]{6}$")
 
 
 class FolderOut(BaseModel):
@@ -118,6 +120,20 @@ class FolderOut(BaseModel):
     name: str
     parent_id: int | None
     path: str
+    color: str | None = None
+    effective_color: str | None = None
+
+
+class ThemeOut(BaseModel):
+    primary_color: str
+
+
+class ThemeUpdate(BaseModel):
+    primary_color: str = Field(pattern=r"^#[0-9A-Fa-f]{6}$")
+
+
+class BrandingOut(ThemeOut):
+    has_custom_logo: bool = False
 
 
 class MaterialOut(BaseModel):
