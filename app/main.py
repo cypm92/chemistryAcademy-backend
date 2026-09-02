@@ -76,6 +76,20 @@ def ensure_class_attachment_column() -> None:
         connection.execute(text("UPDATE materials SET is_class_attachment = TRUE WHERE id IN (SELECT material_id FROM booking_materials)"))
 
 
+def ensure_folder_color_column() -> None:
+    columns = {column["name"] for column in inspect(engine).get_columns("folders")}
+    if "color" not in columns:
+        with engine.begin() as connection:
+            connection.execute(text("ALTER TABLE folders ADD COLUMN color VARCHAR(7)"))
+
+
+def ensure_default_theme() -> None:
+    with SessionLocal() as db:
+        if not db.get(models.AppSetting, "primary_color"):
+            db.add(models.AppSetting(key="primary_color", value="#1D6B4F"))
+            db.commit()
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     Base.metadata.create_all(engine)
@@ -83,6 +97,8 @@ async def lifespan(_: FastAPI):
     ensure_booking_history_column()
     ensure_booking_comment_column()
     ensure_class_attachment_column()
+    ensure_folder_color_column()
+    ensure_default_theme()
     seed_admin()
     ensure_default_folder()
     yield
@@ -96,6 +112,76 @@ app.add_middleware(CORSMiddleware, allow_origins=settings.allowed_origins,
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/theme", response_model=schemas.ThemeOut)
+def theme(db: Session = Depends(get_db)):
+    setting = db.get(models.AppSetting, "primary_color")
+    return {"primary_color": setting.value if setting else "#1D6B4F"}
+
+
+@app.get("/branding", response_model=schemas.BrandingOut)
+def branding(db: Session = Depends(get_db)):
+    color = db.get(models.AppSetting, "primary_color")
+    logo = db.get(models.AppSetting, "logo_key")
+    return {"primary_color": color.value if color else "#1D6B4F", "has_custom_logo": bool(logo and logo.value)}
+
+
+@app.get("/branding/logo")
+def branding_logo(db: Session = Depends(get_db)):
+    key = db.get(models.AppSetting, "logo_key")
+    content_type = db.get(models.AppSetting, "logo_content_type")
+    if not key or not key.value:
+        raise HTTPException(404, "No hay un logo personalizado")
+    path = storage.path(key.value)
+    if not path.exists():
+        raise HTTPException(404, "El logo no está disponible")
+    return FileResponse(path, media_type=content_type.value if content_type else "image/png",
+                        headers={"Cache-Control": "public, max-age=300", "X-Content-Type-Options": "nosniff"})
+
+
+@app.patch("/admin/theme", response_model=schemas.ThemeOut)
+def update_theme(data: schemas.ThemeUpdate, _: models.User = Depends(admin_user), db: Session = Depends(get_db)):
+    setting = db.get(models.AppSetting, "primary_color")
+    if not setting:
+        setting = models.AppSetting(key="primary_color", value=data.primary_color.upper())
+        db.add(setting)
+    else:
+        setting.value = data.primary_color.upper()
+    db.commit(); db.refresh(setting)
+    return {"primary_color": setting.value}
+
+
+@app.put("/admin/branding/logo", response_model=schemas.BrandingOut)
+async def update_branding_logo(file: UploadFile = File(...), _: models.User = Depends(admin_user), db: Session = Depends(get_db)):
+    content_type = (file.content_type or "").lower()
+    suffix = Path(file.filename or "").suffix.lower()
+    if content_type not in {"image/jpeg", "image/png", "image/webp"} or suffix not in {".jpg", ".jpeg", ".png", ".webp"}:
+        raise HTTPException(400, "Selecciona un logo en formato JPG, PNG o WebP")
+    if file.size is not None and file.size > 5 * 1024 * 1024:
+        raise HTTPException(400, "El logo no puede superar 5 MB")
+    key, size = await storage.save(file)
+    if size > 5 * 1024 * 1024:
+        storage.delete(key)
+        raise HTTPException(400, "El logo no puede superar 5 MB")
+    old_key = db.get(models.AppSetting, "logo_key")
+    old_value = old_key.value if old_key else None
+    if not old_key:
+        old_key = models.AppSetting(key="logo_key", value=key)
+        db.add(old_key)
+    else:
+        old_key.value = key
+    content = db.get(models.AppSetting, "logo_content_type")
+    if not content:
+        content = models.AppSetting(key="logo_content_type", value=content_type)
+        db.add(content)
+    else:
+        content.value = content_type
+    db.commit()
+    if old_value:
+        storage.delete(old_value)
+    color = db.get(models.AppSetting, "primary_color")
+    return {"primary_color": color.value if color else "#1D6B4F", "has_custom_logo": True}
 
 
 @app.post("/auth/register", response_model=schemas.UserOut, status_code=201)
@@ -567,6 +653,21 @@ def folder_path(folder: models.Folder) -> str:
     return " / ".join(reversed(names))
 
 
+def folder_effective_color(folder: models.Folder) -> str | None:
+    current: models.Folder | None = folder
+    while current:
+        if current.color:
+            return current.color
+        current = current.parent
+    return None
+
+
+def folder_data(folder: models.Folder) -> dict:
+    return {"id": folder.id, "name": folder.name, "parent_id": folder.parent_id,
+            "path": folder_path(folder), "color": folder.color,
+            "effective_color": folder_effective_color(folder)}
+
+
 def material_data(material: models.Material) -> dict:
     """Serialize a material including the computed path of its folder."""
     folder = material.folder
@@ -575,8 +676,7 @@ def material_data(material: models.Material) -> dict:
         "title": material.title,
         "description": material.description,
         "folder": (
-            {"id": folder.id, "name": folder.name, "parent_id": folder.parent_id,
-             "path": folder_path(folder)}
+            folder_data(folder)
             if folder else None
         ),
         "kind": material.kind,
@@ -639,8 +739,7 @@ def user_grants(user_id: int, _: models.User = Depends(admin_user), db: Session 
 @app.get("/admin/folders", response_model=list[schemas.FolderOut])
 def all_folders(_: models.User = Depends(admin_user), db: Session = Depends(get_db)):
     folders = list(db.scalars(select(models.Folder).order_by(models.Folder.name)))
-    return [{"id": folder.id, "name": folder.name, "parent_id": folder.parent_id, "path": folder_path(folder)}
-            for folder in folders]
+    return [folder_data(folder) for folder in folders]
 
 
 @app.post("/admin/folders", response_model=schemas.FolderOut, status_code=201)
@@ -656,9 +755,9 @@ def create_folder(data: schemas.FolderCreate, _: models.User = Depends(admin_use
     ))
     if duplicate:
         raise HTTPException(400, "Ya existe una carpeta con ese nombre en esa ubicación")
-    folder = models.Folder(name=name, parent_id=data.parent_id)
+    folder = models.Folder(name=name, parent_id=data.parent_id, color=data.color.upper() if data.color else None)
     db.add(folder); db.commit(); db.refresh(folder)
-    return {"id": folder.id, "name": folder.name, "parent_id": folder.parent_id, "path": folder_path(folder)}
+    return folder_data(folder)
 
 
 @app.patch("/admin/folders/{folder_id}", response_model=schemas.FolderOut)
@@ -691,9 +790,9 @@ def update_folder(folder_id: int, data: schemas.FolderUpdate, _: models.User = D
     ))
     if duplicate:
         raise HTTPException(400, "Ya existe una carpeta con ese nombre en esa ubicación")
-    folder.name, folder.parent_id = name, data.parent_id
+    folder.name, folder.parent_id, folder.color = name, data.parent_id, data.color.upper() if data.color else None
     db.commit(); db.refresh(folder)
-    return {"id": folder.id, "name": folder.name, "parent_id": folder.parent_id, "path": folder_path(folder)}
+    return folder_data(folder)
 
 
 @app.delete("/admin/folders/{folder_id}", status_code=204)

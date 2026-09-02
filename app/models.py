@@ -34,8 +34,16 @@ class Folder(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     parent_id: Mapped[int | None] = mapped_column(ForeignKey("folders.id", ondelete="CASCADE"), nullable=True, index=True)
+    color: Mapped[str | None] = mapped_column(String(7), nullable=True)
 
     parent: Mapped["Folder | None"] = relationship(remote_side="Folder.id")
+
+
+class AppSetting(Base):
+    __tablename__ = "app_settings"
+
+    key: Mapped[str] = mapped_column(String(80), primary_key=True)
+    value: Mapped[str] = mapped_column(String(255), nullable=False)
 
 
 class Material(Base):
