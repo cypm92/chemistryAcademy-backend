@@ -1,5 +1,7 @@
 from datetime import datetime
 
+from typing import Any
+
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 
@@ -136,6 +138,10 @@ class BrandingOut(ThemeOut):
     has_custom_logo: bool = False
 
 
+class HomeContentUpdate(BaseModel):
+    content: dict[str, Any]
+
+
 class MaterialOut(BaseModel):
     id: int
     title: str
@@ -160,6 +166,33 @@ class BookingCreate(BaseModel):
     starts_at: datetime
     subject: str = Field(min_length=3, max_length=100)
     duration_slots: int = Field(ge=1, le=4)
+
+
+class PublicTrialBookingCreate(BaseModel):
+    name: str = Field(min_length=2, max_length=120)
+    email: EmailStr
+    starts_at: datetime
+    subject: str = Field(min_length=3, max_length=100)
+
+
+class PublicBookingOut(BaseModel):
+    id: int
+    starts_at: datetime
+    ends_at: datetime
+    status: str
+
+
+class ContactRequestCreate(BaseModel):
+    name: str = Field(min_length=2, max_length=120)
+    contact: str = Field(min_length=3, max_length=255)
+    need: str = Field(min_length=2, max_length=100)
+    message: str = Field(default="", max_length=2000)
+
+
+class ContactRequestOut(ContactRequestCreate):
+    id: int
+    created_at: datetime
+    model_config = ConfigDict(from_attributes=True)
 
 
 class BookingBlockCreate(BaseModel):

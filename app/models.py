@@ -43,7 +43,18 @@ class AppSetting(Base):
     __tablename__ = "app_settings"
 
     key: Mapped[str] = mapped_column(String(80), primary_key=True)
-    value: Mapped[str] = mapped_column(String(255), nullable=False)
+    value: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class ContactRequest(Base):
+    __tablename__ = "contact_requests"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(120))
+    contact: Mapped[str] = mapped_column(String(255))
+    need: Mapped[str] = mapped_column(String(100))
+    message: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class Material(Base):
@@ -129,6 +140,8 @@ class Booking(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True)
+    guest_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    guest_email: Mapped[str | None] = mapped_column(String(255), nullable=True)
     starts_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     ends_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     status: Mapped[str] = mapped_column(String(20), default="requested", index=True)
