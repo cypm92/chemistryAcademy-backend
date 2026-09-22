@@ -9,13 +9,17 @@ on:
 permissions:
   contents: read
 
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: cypm92/chemistryacademy-backend
+
 concurrency:
   group: backend-ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   validate:
-    name: Validar backend
+    name: CI backend
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -29,5 +33,41 @@ jobs:
         run: python -m pip check
       - name: Comprobar sintaxis Python
         run: python -m compileall -q app
+      - name: Comprobar que reiniciar conserva la contraseña de administración
+        run: python -m unittest discover -s tests -v
       - name: Verificar que la imagen Docker se construye
         run: docker build --tag chemistry-academy-backend:ci .
+
+  publish-container:
+    name: Publicar imagen de producción en GHCR
+    needs: validate
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Iniciar sesión en GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Preparar etiquetas y metadatos de imagen
+        id: metadata
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,format=long,prefix=sha-
+            type=raw,value=main
+      - name: Construir y publicar imagen inmutable
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64
+          tags: ${{ steps.metadata.outputs.tags }}
+          labels: ${{ steps.metadata.outputs.labels }}

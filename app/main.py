@@ -27,12 +27,7 @@ def seed_admin() -> None:
         if not existing:
             db.add(models.User(name=settings.admin_name, email=settings.admin_email.lower(),
                                password_hash=hash_password(settings.admin_password), role="admin"))
-        else:
-            existing.name = settings.admin_name
-            existing.password_hash = hash_password(settings.admin_password)
-            existing.role = "admin"
-            existing.is_active = True
-        db.commit()
+            db.commit()
 
 
 def ensure_default_folder() -> None:
