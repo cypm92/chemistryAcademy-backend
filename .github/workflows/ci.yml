@@ -33,6 +33,8 @@ jobs:
         run: python -m pip check
       - name: Comprobar sintaxis Python
         run: python -m compileall -q app
+      - name: Comprobar que reiniciar conserva la contraseña de administración
+        run: python -m unittest discover -s tests -v
       - name: Verificar que la imagen Docker se construye
         run: docker build --tag chemistry-academy-backend:ci .
 
