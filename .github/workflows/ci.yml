@@ -19,7 +19,7 @@ concurrency:
 
 jobs:
   validate:
-    name: Validar backend
+    name: CI backend
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
