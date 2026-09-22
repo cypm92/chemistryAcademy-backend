@@ -11,7 +11,7 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: cypm92/chemistryacademy-backend
+  IMAGE_NAME: cypm92/beciencia-backend
 
 concurrency:
   group: backend-ci-${{ github.workflow }}-${{ github.ref }}
@@ -55,6 +55,14 @@ jobs:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      # This package must first be created privately outside a public-repo
+      # GITHUB_TOKEN workflow. Never let this job create it implicitly.
+      - name: Comprobar que el paquete existente es privado
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          visibility="$(gh api "user/packages/container/${IMAGE_NAME#*/}" --jq .visibility)"
+          test "$visibility" = private
       - name: Preparar etiquetas y metadatos de imagen
         id: metadata
         uses: docker/metadata-action@v5
@@ -70,4 +78,3 @@ jobs:
           push: true
           platforms: linux/amd64
           tags: ${{ steps.metadata.outputs.tags }}
-          labels: ${{ steps.metadata.outputs.labels }}
