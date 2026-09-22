@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+import json
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile, status
@@ -11,7 +12,7 @@ from sqlalchemy.orm import Session
 from . import models, schemas
 from .config import settings
 from .database import Base, SessionLocal, engine, get_db
-from .notifications import notify_admin_of_booking_request, notify_student_of_booking_decision
+from .notifications import notify_admin_of_booking_request, notify_admin_of_contact_request, notify_student_of_booking_decision
 from .security import admin_user, create_token, current_user, hash_password, verify_password
 from .storage import storage
 
@@ -61,6 +62,15 @@ def ensure_booking_history_column() -> None:
             connection.execute(text("ALTER TABLE bookings ADD COLUMN is_historical BOOLEAN NOT NULL DEFAULT FALSE"))
 
 
+def ensure_guest_booking_columns() -> None:
+    columns = {column["name"] for column in inspect(engine).get_columns("bookings")}
+    with engine.begin() as connection:
+        if "guest_name" not in columns:
+            connection.execute(text("ALTER TABLE bookings ADD COLUMN guest_name VARCHAR(120)"))
+        if "guest_email" not in columns:
+            connection.execute(text("ALTER TABLE bookings ADD COLUMN guest_email VARCHAR(255)"))
+
+
 def ensure_booking_comment_column() -> None:
     columns = {column["name"] for column in inspect(engine).get_columns("bookings")}
     if "admin_comment" not in columns:
@@ -90,14 +100,50 @@ def ensure_default_theme() -> None:
             db.commit()
 
 
+def ensure_app_setting_text_column() -> None:
+    if engine.dialect.name == "postgresql":
+        with engine.begin() as connection:
+            connection.execute(text("ALTER TABLE app_settings ALTER COLUMN value TYPE TEXT"))
+
+
+HOME_CONTENT_DEFAULT = {
+    "hero_title": "La química no se memoriza. Se entiende.",
+    "hero_description": "Clases particulares y en grupo reducido, online, para 2º de Bachillerato y universitarios de química, física y matemáticas.",
+    "concerns": ["Estudio horas y luego en el examen me quedo en blanco.", "Entiendo la teoría, pero no sé por dónde empezar el problema.", "Apruebo raspado y necesito subir la nota para entrar donde quiero.", "Llevo dos convocatorias con orgánica y no hay manera.", "Voy perdido y no sé si voy a llegar a la PAU."],
+    "particular_price_bach": "22 €", "particular_price_uni": "27 €",
+    "about_title": "Hola, soy Be Ciencia.",
+    "about_quote": "La química deja de ser un muro cuando alguien te enseña a mirarla bien.",
+    "about_text": "Clases cercanas, claras y pensadas para que entiendas lo que haces antes de memorizarlo.",
+    "newsletter_title": "Un ejercicio resuelto en tu correo, cada semana.",
+    "newsletter_text": "Un problema tipo examen explicado paso a paso, con el error que casi todo el mundo comete en él.",
+    "contact_title": "Hablamos.", "contact_text": "Escríbeme y reservamos tu clase de prueba gratuita. Te contesto yo, no un formulario automático.",
+    "whatsapp": "", "email": "", "instagram": "",
+    "closing_title": "Antes de irte, llévate el método.",
+    "closing_text": "Empieza con una clase de prueba gratuita y descubre una forma distinta de estudiar química.",
+}
+
+
+def home_content(db: Session) -> dict:
+    setting = db.get(models.AppSetting, "home_content")
+    if not setting:
+        return HOME_CONTENT_DEFAULT
+    try:
+        saved = json.loads(setting.value)
+        return {**HOME_CONTENT_DEFAULT, **saved}
+    except (TypeError, json.JSONDecodeError):
+        return HOME_CONTENT_DEFAULT
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     Base.metadata.create_all(engine)
     ensure_user_avatar_columns()
     ensure_booking_history_column()
+    ensure_guest_booking_columns()
     ensure_booking_comment_column()
     ensure_class_attachment_column()
     ensure_folder_color_column()
+    ensure_app_setting_text_column()
     ensure_default_theme()
     seed_admin()
     ensure_default_folder()
@@ -125,6 +171,26 @@ def branding(db: Session = Depends(get_db)):
     color = db.get(models.AppSetting, "primary_color")
     logo = db.get(models.AppSetting, "logo_key")
     return {"primary_color": color.value if color else "#1D6B4F", "has_custom_logo": bool(logo and logo.value)}
+
+
+@app.get("/home-content")
+def get_home_content(db: Session = Depends(get_db)):
+    return {"content": home_content(db)}
+
+
+@app.patch("/admin/home-content")
+def update_home_content(data: schemas.HomeContentUpdate, _: models.User = Depends(admin_user), db: Session = Depends(get_db)):
+    serialized = json.dumps(data.content, ensure_ascii=False)
+    if len(serialized) > 20000:
+        raise HTTPException(400, "El contenido de la portada es demasiado extenso")
+    setting = db.get(models.AppSetting, "home_content")
+    if not setting:
+        setting = models.AppSetting(key="home_content", value=serialized)
+        db.add(setting)
+    else:
+        setting.value = serialized
+    db.commit()
+    return {"content": home_content(db)}
 
 
 @app.get("/branding/logo")
@@ -279,7 +345,7 @@ def booking_data(booking: models.Booking, viewer: models.User, include_user: boo
         "note": booking.note if (is_mine or viewer.role == "admin") else "",
         "admin_comment": booking.admin_comment if (is_mine or viewer.role == "admin") else "",
         "user_id": booking.user_id if viewer.role == "admin" else None,
-        "user_name": booking.user.name if (include_user and booking.user) else None,
+        "user_name": (booking.user.name if booking.user else booking.guest_name) if include_user else None,
         "is_mine": is_mine,
     }
     return data
@@ -294,6 +360,46 @@ def booking_conflicts(starts_at: datetime, ends_at: datetime, db: Session, exclu
     if exclude_id is not None:
         statement = statement.where(models.Booking.id != exclude_id)
     return db.scalar(statement) is not None
+
+
+@app.get("/public/bookings", response_model=list[schemas.PublicBookingOut])
+def public_bookings(db: Session = Depends(get_db)):
+    rows = list(db.scalars(select(models.Booking).where(
+        models.Booking.status.in_(BOOKING_ACTIVE_STATUSES),
+        models.Booking.ends_at > datetime.now(timezone.utc),
+    ).order_by(models.Booking.starts_at)))
+    return [{"id": row.id, "starts_at": row.starts_at, "ends_at": row.ends_at, "status": row.status} for row in rows]
+
+
+@app.post("/public/trial-bookings", response_model=schemas.PublicBookingOut, status_code=201)
+def request_public_trial_booking(data: schemas.PublicTrialBookingCreate, db: Session = Depends(get_db)):
+    starts_at = aware(data.starts_at)
+    if starts_at <= datetime.now(timezone.utc):
+        raise HTTPException(400, "Solo puedes reservar franjas futuras")
+    if starts_at.minute not in {0, 30} or starts_at.second or starts_at.microsecond:
+        raise HTTPException(400, "La clase debe comenzar en una franja de 30 minutos")
+    if data.subject not in BOOKING_SUBJECTS:
+        raise HTTPException(400, "Selecciona una asignatura válida")
+    ends_at = starts_at + timedelta(hours=1)
+    if booking_conflicts(starts_at, ends_at, db):
+        raise HTTPException(409, "Esta hora ya no está disponible")
+    booking = models.Booking(guest_name=data.name.strip(), guest_email=data.email.lower(), starts_at=starts_at, ends_at=ends_at,
+                             status="requested", note=f"Clase de prueba · {data.subject}")
+    db.add(booking); db.commit(); db.refresh(booking)
+    return {"id": booking.id, "starts_at": booking.starts_at, "ends_at": booking.ends_at, "status": booking.status}
+
+
+@app.post("/public/contact-requests", response_model=schemas.ContactRequestOut, status_code=201)
+def create_contact_request(data: schemas.ContactRequestCreate, db: Session = Depends(get_db)):
+    request = models.ContactRequest(name=data.name.strip(), contact=data.contact.strip(), need=data.need.strip(), message=data.message.strip())
+    db.add(request); db.commit(); db.refresh(request)
+    notify_admin_of_contact_request(request)
+    return request
+
+
+@app.get("/admin/contact-requests", response_model=list[schemas.ContactRequestOut])
+def contact_requests(_: models.User = Depends(admin_user), db: Session = Depends(get_db)):
+    return list(db.scalars(select(models.ContactRequest).order_by(models.ContactRequest.created_at.desc())))
 
 
 @app.get("/bookings", response_model=list[schemas.BookingOut])
