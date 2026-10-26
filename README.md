@@ -39,7 +39,7 @@ Abre `http://localhost:5174`. La API local estará en
 hacia ella. El usuario inicial es el definido en `.env.local`; con el ejemplo:
 
 ```text
-Email: admin@beciencia.local
+Email: admin@beciencia.academy
 Contraseña: ChangeMe123!
 ```
 
