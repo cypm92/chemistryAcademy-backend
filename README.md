@@ -63,6 +63,27 @@ Los datos locales se conservan al parar los contenedores. Si quieres borrar
 solo el entorno local y empezar desde cero, usa `down -v` con el mismo comando.
 Nunca uses esa opción contra producción.
 
+#### Cargar datos ficticios para probar la plataforma
+
+Con el entorno local arrancado, este comando crea una colección reutilizable de
+alumnos, un segundo administrador, árbol de carpetas, PDFs de ejemplo, etiquetas,
+permisos, reservas, bloqueos y solicitudes de la portada:
+
+```powershell
+docker compose --env-file .env.local -f docker-compose.local.yml exec backend python -m app.seed_demo
+```
+
+Se puede ejecutar más de una vez: actualiza los datos demo y vuelve a crear las
+reservas y solicitudes ficticias. Nunca se ejecuta automáticamente ni está
+conectado a producción.
+
+Credenciales útiles tras sembrar:
+
+```text
+Alumna: alba@demo.beciencia.academy / AlumnoDemo123!
+Administradora: marta@demo.beciencia.academy / DemoAdmin123!
+```
+
 ### Opción recomendada: Docker
 
 Sólo necesitas Docker Desktop. Ejecuta Compose desde la carpeta `backend`:

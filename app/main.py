@@ -807,7 +807,9 @@ def active_material_grant(material_id: int, user_id: int, now: datetime, db: Ses
         models.AccessGrant.user_id == user_id, models.AccessGrant.material_id == material_id,
         models.AccessGrant.starts_at <= now, models.AccessGrant.expires_at > now,
     ))
-    tag_grant = db.scalar(select(models.TagAccessGrant).join(models.MaterialTag).where(
+    tag_grant = db.scalar(select(models.TagAccessGrant).join(
+        models.MaterialTag, models.MaterialTag.tag_id == models.TagAccessGrant.tag_id,
+    ).where(
         models.MaterialTag.material_id == material_id,
         models.TagAccessGrant.user_id == user_id,
         models.TagAccessGrant.tag_id == models.MaterialTag.tag_id,
