@@ -158,6 +158,10 @@ class MaterialOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class MaterialMove(BaseModel):
+    folder_id: int = Field(gt=0)
+
+
 class AdminMaterialOut(MaterialOut):
     grants: list[GrantWithUserOut] = []
 

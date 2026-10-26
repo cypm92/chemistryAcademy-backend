@@ -1,0 +1,46 @@
+name: beciencia-local
+
+# Entorno exclusivo de desarrollo: no comparte volúmenes, credenciales ni red
+# con producción. El frontend se ejecuta con Vite desde ../frontend para obtener
+# actualización instantánea al guardar cambios de Vue o CSS.
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: beciencia
+      POSTGRES_PASSWORD: beciencia_local
+      POSTGRES_DB: beciencia_local
+    volumes:
+      - beciencia_local_db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U beciencia -d beciencia_local"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: .
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    environment:
+      DATABASE_URL: postgresql+psycopg2://beciencia:beciencia_local@db:5432/beciencia_local
+      SECRET_KEY: ${LOCAL_SECRET_KEY:?Copia .env.local.example a .env.local y define LOCAL_SECRET_KEY}
+      ACCESS_TOKEN_EXPIRE_MINUTES: 480
+      ADMIN_NAME: ${LOCAL_ADMIN_NAME:-Administradora local}
+      ADMIN_EMAIL: ${LOCAL_ADMIN_EMAIL:-admin@beciencia.local}
+      ADMIN_PASSWORD: ${LOCAL_ADMIN_PASSWORD:?Copia .env.local.example a .env.local y define LOCAL_ADMIN_PASSWORD}
+      STORAGE_DIR: /app/storage
+      CORS_ORIGINS: http://localhost:${LOCAL_FRONTEND_PORT:-5174},http://127.0.0.1:${LOCAL_FRONTEND_PORT:-5174}
+    volumes:
+      - ./app:/app/app
+      - ./tests:/app/tests:ro
+      - beciencia_local_files:/app/storage
+    ports:
+      - "${LOCAL_BACKEND_PORT:-8001}:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  beciencia_local_db:
+  beciencia_local_files:

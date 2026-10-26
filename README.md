@@ -14,6 +14,76 @@ accesos individuales y fecha de caducidad.
 
 ## Arranque rápido
 
+### Desarrollo visual rápido (recomendado para cambios de interfaz)
+
+Este modo mantiene los datos completamente locales en volúmenes Docker y abre el
+frontend con Vite. Al guardar un cambio en Vue o CSS, el navegador se actualiza
+en segundos sin reconstruir una imagen ni desplegar nada en el VPS.
+
+La primera vez, desde la carpeta `backend`:
+
+```powershell
+Copy-Item .env.local.example .env.local
+docker compose --env-file .env.local -f docker-compose.local.yml up -d --build
+```
+
+Después, en otra terminal desde la carpeta `frontend`:
+
+```powershell
+npm install
+npm run dev
+```
+
+Abre `http://localhost:5174`. La API local estará en
+`http://localhost:8001`, y Vite redirige automáticamente las llamadas `/api`
+hacia ella. El usuario inicial es el definido en `.env.local`; con el ejemplo:
+
+```text
+Email: admin@beciencia.academy
+Contraseña: ChangeMe123!
+```
+
+Para los siguientes arranques no hace falta reconstruir nada:
+
+```powershell
+# Terminal 1, desde backend
+docker compose --env-file .env.local -f docker-compose.local.yml up -d
+
+# Terminal 2, desde frontend
+npm run dev
+```
+
+Para detenerlo:
+
+```powershell
+docker compose --env-file .env.local -f docker-compose.local.yml down
+```
+
+Los datos locales se conservan al parar los contenedores. Si quieres borrar
+solo el entorno local y empezar desde cero, usa `down -v` con el mismo comando.
+Nunca uses esa opción contra producción.
+
+#### Cargar datos ficticios para probar la plataforma
+
+Con el entorno local arrancado, este comando crea una colección reutilizable de
+alumnos, un segundo administrador, árbol de carpetas, PDFs de ejemplo, etiquetas,
+permisos, reservas, bloqueos y solicitudes de la portada:
+
+```powershell
+docker compose --env-file .env.local -f docker-compose.local.yml exec backend python -m app.seed_demo
+```
+
+Se puede ejecutar más de una vez: actualiza los datos demo y vuelve a crear las
+reservas y solicitudes ficticias. Nunca se ejecuta automáticamente ni está
+conectado a producción.
+
+Credenciales útiles tras sembrar:
+
+```text
+Alumna: alba@demo.beciencia.academy / AlumnoDemo123!
+Administradora: marta@demo.beciencia.academy / DemoAdmin123!
+```
+
 ### Opción recomendada: Docker
 
 Sólo necesitas Docker Desktop. Ejecuta Compose desde la carpeta `backend`:

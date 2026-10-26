@@ -807,7 +807,9 @@ def active_material_grant(material_id: int, user_id: int, now: datetime, db: Ses
         models.AccessGrant.user_id == user_id, models.AccessGrant.material_id == material_id,
         models.AccessGrant.starts_at <= now, models.AccessGrant.expires_at > now,
     ))
-    tag_grant = db.scalar(select(models.TagAccessGrant).join(models.MaterialTag).where(
+    tag_grant = db.scalar(select(models.TagAccessGrant).join(
+        models.MaterialTag, models.MaterialTag.tag_id == models.TagAccessGrant.tag_id,
+    ).where(
         models.MaterialTag.material_id == material_id,
         models.TagAccessGrant.user_id == user_id,
         models.TagAccessGrant.tag_id == models.MaterialTag.tag_id,
@@ -876,11 +878,6 @@ def update_folder(folder_id: int, data: schemas.FolderUpdate, _: models.User = D
     if data.parent_id is not None and not db.get(models.Folder, data.parent_id):
         raise HTTPException(404, "La carpeta padre no existe")
     parent = db.get(models.Folder, data.parent_id) if data.parent_id is not None else None
-    if parent and len(folder_path(parent).split(" / ")) >= 3:
-        raise HTTPException(400, "Solo se permiten tres niveles de carpetas")
-    parent = db.get(models.Folder, data.parent_id) if data.parent_id is not None else None
-    if parent and len(folder_path(parent).split(" / ")) >= 3:
-        raise HTTPException(400, "Solo se permiten tres niveles de carpetas")
     while parent:
         if parent.id == folder.id:
             raise HTTPException(400, "No puedes mover una carpeta dentro de una de sus subcarpetas")
@@ -981,6 +978,20 @@ async def upload_material(title: str = Form(...), description: str = Form(""), f
         elif tag.name != name:
             tag.name = name
         material.tag_links.append(models.MaterialTag(tag=tag))
+    db.commit(); db.refresh(material)
+    return material_data(material)
+
+
+@app.patch("/admin/materials/{material_id}/folder", response_model=schemas.MaterialOut)
+def move_material(material_id: int, data: schemas.MaterialMove, _: models.User = Depends(admin_user),
+                  db: Session = Depends(get_db)):
+    material = db.get(models.Material, material_id)
+    if not material or material.is_class_attachment:
+        raise HTTPException(404, "Material no encontrado")
+    folder = db.get(models.Folder, data.folder_id)
+    if not folder:
+        raise HTTPException(404, "La carpeta seleccionada no existe")
+    material.folder = folder
     db.commit(); db.refresh(material)
     return material_data(material)
 
