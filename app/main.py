@@ -982,6 +982,20 @@ async def upload_material(title: str = Form(...), description: str = Form(""), f
     return material_data(material)
 
 
+@app.patch("/admin/materials/{material_id}/folder", response_model=schemas.MaterialOut)
+def move_material(material_id: int, data: schemas.MaterialMove, _: models.User = Depends(admin_user),
+                  db: Session = Depends(get_db)):
+    material = db.get(models.Material, material_id)
+    if not material or material.is_class_attachment:
+        raise HTTPException(404, "Material no encontrado")
+    folder = db.get(models.Folder, data.folder_id)
+    if not folder:
+        raise HTTPException(404, "La carpeta seleccionada no existe")
+    material.folder = folder
+    db.commit(); db.refresh(material)
+    return material_data(material)
+
+
 @app.delete("/admin/materials/{material_id}", status_code=204)
 def delete_material(material_id: int, _: models.User = Depends(admin_user), db: Session = Depends(get_db)):
     material = db.get(models.Material, material_id)

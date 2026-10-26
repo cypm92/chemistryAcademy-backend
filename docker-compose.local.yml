@@ -33,6 +33,7 @@ services:
       CORS_ORIGINS: http://localhost:${LOCAL_FRONTEND_PORT:-5174},http://127.0.0.1:${LOCAL_FRONTEND_PORT:-5174}
     volumes:
       - ./app:/app/app
+      - ./tests:/app/tests:ro
       - beciencia_local_files:/app/storage
     ports:
       - "${LOCAL_BACKEND_PORT:-8001}:8000"
