@@ -878,11 +878,6 @@ def update_folder(folder_id: int, data: schemas.FolderUpdate, _: models.User = D
     if data.parent_id is not None and not db.get(models.Folder, data.parent_id):
         raise HTTPException(404, "La carpeta padre no existe")
     parent = db.get(models.Folder, data.parent_id) if data.parent_id is not None else None
-    if parent and len(folder_path(parent).split(" / ")) >= 3:
-        raise HTTPException(400, "Solo se permiten tres niveles de carpetas")
-    parent = db.get(models.Folder, data.parent_id) if data.parent_id is not None else None
-    if parent and len(folder_path(parent).split(" / ")) >= 3:
-        raise HTTPException(400, "Solo se permiten tres niveles de carpetas")
     while parent:
         if parent.id == folder.id:
             raise HTTPException(400, "No puedes mover una carpeta dentro de una de sus subcarpetas")
