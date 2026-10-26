@@ -78,7 +78,7 @@ def main() -> None:
         solutions = folder("Disoluciones", chemistry)
         exercises = folder("Ejercicios resueltos", solutions)
         exercise_one = folder("Ejercicio 1", exercises)
-        folder("Problemas de repaso", exercise_one)
+        review_problems = folder("Problemas de repaso", exercise_one)
         folder("Ejercicio 2", exercises)
         folder("Ejercicio 3", exercises)
         equilibrium = folder("Equilibrio químico", chemistry)
@@ -104,6 +104,7 @@ def main() -> None:
             ("Nomenclatura orgánica esencial", "Hoja de trabajo para repasar grupos funcionales.", nomenclature, ("BACHILLERATO", "ORGÁNICA")),
             ("Cinemática: problemas tipo PAU", "Colección de problemas de movimiento rectilíneo y circular.", kinematics, ("BACHILLERATO", "PAU")),
             ("Derivadas y optimización", "Problemas seleccionados para primer curso universitario.", derivatives, ("UNIVERSIDAD",)),
+            ("Problemas de repaso: disoluciones", "Material de prueba situado en el quinto nivel de carpetas.", review_problems, ("BACHILLERATO", "PAU")),
         ]
         materials: dict[str, models.Material] = {}
         for index, (title, description, parent, tag_names) in enumerate(material_specs, start=1):
