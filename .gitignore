@@ -1,5 +1,6 @@
 .venv/
 .env
+.env.local
 academy.db
 storage/
 __pycache__/
