@@ -16,9 +16,9 @@ accesos individuales y fecha de caducidad.
 
 ### Desarrollo visual rápido (recomendado para cambios de interfaz)
 
-Este modo mantiene los datos completamente locales en volúmenes Docker y abre el
-frontend con Vite. Al guardar un cambio en Vue o CSS, el navegador se actualiza
-en segundos sin reconstruir una imagen ni desplegar nada en el VPS.
+Este modo ejecuta PostgreSQL, backend y frontend en Docker. El frontend usa
+Vite con el código montado desde `../frontend`: al guardar un cambio en Vue o
+CSS, el navegador se actualiza sin reconstruir la imagen ni desplegar en el VPS.
 
 La primera vez, desde la carpeta `backend`:
 
@@ -27,16 +27,18 @@ Copy-Item .env.local.example .env.local
 docker compose --env-file .env.local -f docker-compose.local.yml up -d --build
 ```
 
-Después, en otra terminal desde la carpeta `frontend`:
-
-```powershell
-npm install
-npm run dev
-```
-
 Abre `http://localhost:5174`. La API local estará en
 `http://localhost:8001`, y Vite redirige automáticamente las llamadas `/api`
-hacia ella. El usuario inicial es el definido en `.env.local`; con el ejemplo:
+al backend dentro de Docker. El worker de notificaciones también se ejecuta en un
+contenedor separado, con la misma imagen del backend. En desarrollo usa
+`SMTP_MODE=log`: registra la simulación y no envía correos reales. Para ver sus
+logs:
+
+```powershell
+docker compose --env-file .env.local -f docker-compose.local.yml logs -f notification-worker
+```
+
+El usuario inicial es el definido en `.env.local`; con el ejemplo:
 
 ```text
 Email: admin@beciencia.academy
@@ -46,11 +48,8 @@ Contraseña: ChangeMe123!
 Para los siguientes arranques no hace falta reconstruir nada:
 
 ```powershell
-# Terminal 1, desde backend
+# Desde backend
 docker compose --env-file .env.local -f docker-compose.local.yml up -d
-
-# Terminal 2, desde frontend
-npm run dev
 ```
 
 Para detenerlo:
