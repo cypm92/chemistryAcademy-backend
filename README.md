@@ -29,8 +29,16 @@ docker compose --env-file .env.local -f docker-compose.local.yml up -d --build
 
 Abre `http://localhost:5174`. La API local estará en
 `http://localhost:8001`, y Vite redirige automáticamente las llamadas `/api`
-al backend dentro de Docker. El usuario inicial es el definido en `.env.local`;
-con el ejemplo:
+al backend dentro de Docker. El worker de notificaciones también se ejecuta en un
+contenedor separado, con la misma imagen del backend. En desarrollo usa
+`SMTP_MODE=log`: registra la simulación y no envía correos reales. Para ver sus
+logs:
+
+```powershell
+docker compose --env-file .env.local -f docker-compose.local.yml logs -f notification-worker
+```
+
+El usuario inicial es el definido en `.env.local`; con el ejemplo:
 
 ```text
 Email: admin@beciencia.academy

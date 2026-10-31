@@ -18,6 +18,7 @@ services:
       retries: 10
 
   backend:
+    image: beciencia-local-backend:local
     build:
       context: .
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
@@ -36,6 +37,20 @@ services:
       - beciencia_local_files:/app/storage
     ports:
       - "${LOCAL_BACKEND_PORT:-8001}:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  notification-worker:
+    image: beciencia-local-backend:local
+    pull_policy: never
+    command: ["python", "-m", "app.notification_worker"]
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql+psycopg2://beciencia:beciencia_local@db:5432/beciencia_local
+      SMTP_MODE: log
+    volumes:
+      - ./app:/app/app
     depends_on:
       db:
         condition: service_healthy

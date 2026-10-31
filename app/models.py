@@ -46,6 +46,39 @@ class AppSetting(Base):
     value: Mapped[str] = mapped_column(Text, nullable=False)
 
 
+class PublicResource(Base):
+    __tablename__ = "public_resources"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    kind: Mapped[str] = mapped_column(String(10), nullable=False, index=True)
+    title: Mapped[str] = mapped_column(String(180), nullable=False)
+    description: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    subject: Mapped[str] = mapped_column(String(120), default="", nullable=False)
+    url: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    storage_key: Mapped[str | None] = mapped_column(String(255), nullable=True, unique=True)
+    category: Mapped[str | None] = mapped_column(String(10), default="form", nullable=True)
+    community: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    exam_year: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    exam_part: Mapped[str | None] = mapped_column(String(12), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class NotificationEvent(Base):
+    __tablename__ = "notification_events"
+    __table_args__ = (UniqueConstraint("logical_key", name="uq_notification_logical_key"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    logical_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    recipient: Mapped[str] = mapped_column(String(255), nullable=False)
+    subject: Mapped[str] = mapped_column(String(255), nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
 class ContactRequest(Base):
     __tablename__ = "contact_requests"
 

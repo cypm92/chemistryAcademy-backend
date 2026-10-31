@@ -1,6 +1,8 @@
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 import json
+import re
+from urllib.parse import urlsplit
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile, status
@@ -11,8 +13,10 @@ from sqlalchemy.orm import Session
 
 from . import models, schemas
 from .config import settings
-from .database import Base, SessionLocal, engine, get_db
-from .notifications import notify_admin_of_booking_request, notify_admin_of_contact_request, notify_student_of_booking_decision
+from .database import Base, SessionLocal, engine, ensure_notification_lease_column, ensure_public_resource_columns, get_db
+from .notifications import (enqueue_booking_change, enqueue_booking_decision, enqueue_booking_request, enqueue_contact_request,
+                            notify_admin_of_booking_request, notify_admin_of_contact_request,
+                            notify_student_of_booking_decision, notification_settings)
 from .security import admin_user, create_token, current_user, hash_password, verify_password
 from .storage import storage
 
@@ -132,6 +136,8 @@ def home_content(db: Session) -> dict:
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     Base.metadata.create_all(engine)
+    ensure_notification_lease_column()
+    ensure_public_resource_columns()
     ensure_user_avatar_columns()
     ensure_booking_history_column()
     ensure_guest_booking_columns()
@@ -153,6 +159,138 @@ app.add_middleware(CORSMiddleware, allow_origins=settings.allowed_origins,
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/admin/notification-settings", response_model=schemas.NotificationSettingsOut)
+def get_notification_settings(_: models.User = Depends(admin_user), db: Session = Depends(get_db)):
+    return notification_settings(db)
+
+
+@app.patch("/admin/notification-settings", response_model=schemas.NotificationSettingsOut)
+def patch_notification_settings(data: schemas.NotificationSettingsUpdate, _: models.User = Depends(admin_user), db: Session = Depends(get_db)):
+    key, value = "reminder_interval_minutes", str(data.reminder_interval_minutes)
+    setting = db.get(models.AppSetting, key)
+    if setting: setting.value = value
+    else: db.add(models.AppSetting(key=key, value=value))
+    db.commit()
+    return notification_settings(db)
+
+
+def _public_resource_data(item):
+    data = {"id": item.id, "title": item.title, "description": item.description, "subject": item.subject}
+    if item.kind == "document": data["category"] = item.category or "form"
+    if item.community is not None: data["community"] = item.community
+    if item.exam_year is not None: data["exam_year"] = item.exam_year
+    if item.exam_part is not None: data["exam_part"] = item.exam_part
+    data["file_url" if item.kind == "document" else "url"] = f"/public/resources/{item.id}/file" if item.kind == "document" else item.url
+    return data
+
+
+@app.get("/public/resources")
+def public_resources(db: Session = Depends(get_db)):
+    items = list(db.scalars(select(models.PublicResource).order_by(models.PublicResource.id)))
+    pdfs = [x for x in items if x.kind == "document"]
+    return {"documents": [_public_resource_data(x) for x in pdfs],
+            "exams": [_public_resource_data(x) for x in pdfs if (x.category or "form") == "exam"],
+            "forms": [_public_resource_data(x) for x in pdfs if (x.category or "form") == "form"],
+            "videos": [_public_resource_data(x) for x in items if x.kind == "video"]}
+
+
+@app.get("/public/resources/{resource_id}/file")
+def public_resource_file(resource_id: int, db: Session = Depends(get_db)):
+    item = db.get(models.PublicResource, resource_id)
+    if not item or item.kind != "document" or not item.storage_key: raise HTTPException(404, "Recurso no encontrado")
+    try: path = storage.path(item.storage_key)
+    except ValueError: raise HTTPException(404, "Recurso no encontrado")
+    if not path.is_file(): raise HTTPException(404, "Recurso no encontrado")
+    return FileResponse(path, media_type="application/pdf", filename=f"recurso-{item.id}.pdf", content_disposition_type="inline", headers={"X-Content-Type-Options": "nosniff"})
+
+
+@app.get("/admin/public-resources")
+def admin_public_resources(_: models.User = Depends(admin_user), db: Session = Depends(get_db)):
+    items = list(db.scalars(select(models.PublicResource).order_by(models.PublicResource.id)))
+    pdfs = [x for x in items if x.kind == "document"]
+    return {"documents": [_public_resource_data(x) for x in pdfs],
+            "exams": [_public_resource_data(x) for x in pdfs if (x.category or "form") == "exam"],
+            "forms": [_public_resource_data(x) for x in pdfs if (x.category or "form") == "form"],
+            "videos": [_public_resource_data(x) for x in items if x.kind == "video"]}
+
+
+@app.post("/admin/public-resources/videos", status_code=201)
+def create_public_video(data: schemas.PublicVideoCreate, _: models.User = Depends(admin_user), db: Session = Depends(get_db)):
+    parsed = urlsplit(data.url)
+    match = re.fullmatch(r"/(?:p|reel|tv)/([A-Za-z0-9_-]+)/?", parsed.path)
+    try: port = parsed.port
+    except ValueError: port = -1
+    if parsed.scheme != "https" or parsed.hostname not in {"instagram.com", "www.instagram.com"} or port not in (None, 443) or parsed.username or parsed.password or not match or parsed.query or parsed.fragment:
+        raise HTTPException(422, "Se requiere un permalink público de Instagram")
+    subject = normalize_public_subject(data.subject)
+    if subject is None: raise HTTPException(422, "Asignatura no válida")
+    item = models.PublicResource(kind="video", category=None, title=data.title.strip(), description=data.description.strip(), subject=subject, url=data.url)
+    db.add(item); db.commit(); db.refresh(item)
+    return _public_resource_data(item)
+
+
+PUBLIC_SUBJECTS = {"quimica", "organica", "fisica", "matematicas"}
+PUBLIC_SUBJECT_LABELS = {"química": "quimica", "quimica": "quimica", "orgánica": "organica", "organica": "organica", "física": "fisica", "fisica": "fisica", "matemáticas": "matematicas", "matematicas": "matematicas"}
+PAU_COMMUNITIES = {"Andalucía", "Aragón", "Asturias", "Baleares", "Canarias", "Cantabria", "Castilla-La Mancha", "Castilla y León", "Cataluña", "C. Valenciana", "Extremadura", "Galicia", "La Rioja", "Madrid", "Murcia", "Navarra", "País Vasco"}
+
+
+def normalize_public_subject(value: str) -> str | None:
+    key = value.strip().casefold()
+    result = PUBLIC_SUBJECT_LABELS.get(key, key)
+    return result if result in PUBLIC_SUBJECTS else None
+
+
+async def save_public_pdf(title, description, subject, file, category, community=None, exam_year=None, exam_part=None, db=None):
+    if not title.strip() or len(title) > 180 or len(description) > 5000 or len(subject) > 120: raise HTTPException(422, "Metadatos no válidos")
+    content = await file.read(20 * 1024 * 1024 + 1)
+    if len(content) > 20 * 1024 * 1024: raise HTTPException(413, "El PDF supera 20 MB")
+    if not content.startswith(b"%PDF-"): raise HTTPException(422, "El archivo debe ser un PDF válido")
+    from uuid import uuid4
+    key = f"public-{uuid4().hex}.pdf"
+    path = storage.path(key)
+    path.write_bytes(content)
+    item = models.PublicResource(kind="document", category=category, title=title.strip(), description=description.strip(), subject=subject, storage_key=key,
+                                 community=community, exam_year=exam_year, exam_part=exam_part)
+    try:
+        db.add(item); db.commit(); db.refresh(item)
+    except Exception:
+        storage.delete(key); db.rollback(); raise
+    return _public_resource_data(item)
+
+
+@app.post("/admin/public-resources/forms", status_code=201)
+async def create_public_form(title: str = Form(...), description: str = Form(""), subject: str = Form(...), file: UploadFile = File(...), _: models.User = Depends(admin_user), db: Session = Depends(get_db)):
+    normalized = normalize_public_subject(subject)
+    if normalized is None: raise HTTPException(422, "Asignatura no válida")
+    return await save_public_pdf(title, description, normalized, file, "form", db=db)
+
+
+@app.post("/admin/public-resources/exams", status_code=201)
+async def create_public_exam(title: str = Form(...), description: str = Form(""), subject: str = Form(...), community: str = Form(...), exam_year: int = Form(...), exam_part: str = Form(...), file: UploadFile = File(...), _: models.User = Depends(admin_user), db: Session = Depends(get_db)):
+    normalized = normalize_public_subject(subject)
+    if normalized is None: raise HTTPException(422, "Asignatura no válida")
+    if community not in PAU_COMMUNITIES: raise HTTPException(422, "Comunidad no válida")
+    if exam_part not in {"statement", "solutions"}: raise HTTPException(422, "Parte del examen no válida")
+    if not 1900 <= exam_year <= 2200: raise HTTPException(422, "Año no válido")
+    return await save_public_pdf(title, description, normalized, file, "exam", community, exam_year, exam_part, db)
+
+
+@app.post("/admin/public-resources/documents", status_code=201)
+async def create_public_document(title: str = Form(...), description: str = Form(""), subject: str = Form(""), file: UploadFile = File(...), _: models.User = Depends(admin_user), db: Session = Depends(get_db)):
+    normalized = normalize_public_subject(subject) or subject.strip()
+    return await save_public_pdf(title, description, normalized, file, "form", db=db)
+
+
+@app.delete("/admin/public-resources/{resource_id}", status_code=204)
+def delete_public_resource(resource_id: int, _: models.User = Depends(admin_user), db: Session = Depends(get_db)):
+    item = db.get(models.PublicResource, resource_id)
+    if not item: raise HTTPException(404, "Recurso no encontrado")
+    key = item.storage_key
+    db.delete(item); db.commit()
+    if key: storage.delete(key)
+    return Response(status_code=204)
 
 
 @app.get("/theme", response_model=schemas.ThemeOut)
@@ -380,15 +518,18 @@ def request_public_trial_booking(data: schemas.PublicTrialBookingCreate, db: Ses
         raise HTTPException(409, "Esta hora ya no está disponible")
     booking = models.Booking(guest_name=data.name.strip(), guest_email=data.email.lower(), starts_at=starts_at, ends_at=ends_at,
                              status="requested", note=f"Clase de prueba · {data.subject}")
-    db.add(booking); db.commit(); db.refresh(booking)
+    db.add(booking); db.flush()
+    enqueue_booking_request(db, booking)
+    db.commit(); db.refresh(booking)
     return {"id": booking.id, "starts_at": booking.starts_at, "ends_at": booking.ends_at, "status": booking.status}
 
 
 @app.post("/public/contact-requests", response_model=schemas.ContactRequestOut, status_code=201)
 def create_contact_request(data: schemas.ContactRequestCreate, db: Session = Depends(get_db)):
     request = models.ContactRequest(name=data.name.strip(), contact=data.contact.strip(), need=data.need.strip(), message=data.message.strip())
-    db.add(request); db.commit(); db.refresh(request)
-    notify_admin_of_contact_request(request)
+    db.add(request); db.flush()
+    enqueue_contact_request(db, request)
+    db.commit(); db.refresh(request)
     return request
 
 
@@ -417,8 +558,9 @@ def request_booking(data: schemas.BookingCreate, user: models.User = Depends(cur
         raise HTTPException(409, "Esta franja ya no está disponible")
     booking = models.Booking(user_id=user.id, starts_at=starts_at, ends_at=ends_at,
                              status="requested", note=data.subject)
-    db.add(booking); db.commit(); db.refresh(booking)
-    notify_admin_of_booking_request(user, booking)
+    db.add(booking); db.flush()
+    enqueue_booking_request(db, booking)
+    db.commit(); db.refresh(booking)
     return booking_data(booking, user)
 
 
@@ -432,6 +574,7 @@ def cancel_booking(booking_id: int, user: models.User = Depends(current_user), d
     if booking.status == "confirmed" and aware(booking.starts_at) < datetime.now(timezone.utc) + timedelta(hours=24):
         raise HTTPException(400, "Para cancelar una clase con menos de 24 horas, contacta con la administradora")
     booking.status = "cancelled"
+    enqueue_booking_change(db, booking, "Clase cancelada")
     db.commit(); db.refresh(booking)
     return booking_data(booking, user)
 
@@ -455,9 +598,8 @@ def update_booking_status(booking_id: int, data: schemas.BookingStatusUpdate,
     if data.status == "confirmed" and booking_conflicts(booking.starts_at, booking.ends_at, db, booking.id):
         raise HTTPException(409, "La franja ya está ocupada")
     booking.status = data.status
+    enqueue_booking_decision(db, booking)
     db.commit(); db.refresh(booking)
-    if booking.user:
-        notify_student_of_booking_decision(booking.user, booking)
     return booking_data(booking, admin, include_user=True)
 
 
@@ -536,8 +678,11 @@ def update_admin_class(booking_id: int, data: schemas.AdminClassUpdate, _: model
     ends_at = starts_at + timedelta(minutes=30 * data.duration_slots)
     if booking_conflicts(starts_at, ends_at, db, booking.id):
         raise HTTPException(409, "Ese horario no está disponible")
+    previous_start = booking.starts_at
     booking.starts_at, booking.ends_at, booking.note = starts_at, ends_at, data.subject
     booking.admin_comment = data.admin_comment.strip()
+    if booking.status == "confirmed":
+        enqueue_booking_change(db, booking, "Clase reprogramada", previous_start)
     db.commit(); db.refresh(booking)
     return class_data(booking)
 
@@ -548,6 +693,7 @@ def cancel_admin_class(booking_id: int, _: models.User = Depends(admin_user), db
     if not booking or not booking.user:
         raise HTTPException(404, "Clase no encontrada")
     booking.status = "cancelled"
+    enqueue_booking_change(db, booking, "Clase cancelada")
     db.commit(); db.refresh(booking)
     return class_data(booking)
 

@@ -142,6 +142,22 @@ class HomeContentUpdate(BaseModel):
     content: dict[str, Any]
 
 
+class NotificationSettingsUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    reminder_interval_minutes: int = Field(gt=0, le=525600)
+
+
+class NotificationSettingsOut(BaseModel):
+    reminder_interval_minutes: int
+
+
+class PublicVideoCreate(BaseModel):
+    title: str = Field(min_length=1, max_length=180)
+    description: str = Field(default="", max_length=5000)
+    subject: str = Field(default="", max_length=120)
+    url: str = Field(max_length=1000)
+
+
 class MaterialOut(BaseModel):
     id: int
     title: str

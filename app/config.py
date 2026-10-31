@@ -12,6 +12,14 @@ class Settings(BaseSettings):
     admin_password: str = "ChangeMe123!"
     storage_dir: Path = Path("./storage")
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
+    smtp_mode: str = "log"
+    smtp_host: str = ""
+    smtp_port: int = 465
+    smtp_sender: str = "clases@beciencia.es"
+    smtp_username: str = ""
+    smtp_password: str = ""
+    smtp_starttls: bool = True
+    smtp_ssl: bool = True
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
