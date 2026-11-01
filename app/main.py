@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 import json
 import re
 from urllib.parse import urlsplit
@@ -14,7 +15,7 @@ from sqlalchemy.orm import Session
 from . import models, schemas
 from .config import settings
 from .database import Base, SessionLocal, engine, ensure_notification_lease_column, ensure_public_resource_columns, get_db
-from .notifications import (enqueue_booking_change, enqueue_booking_decision, enqueue_booking_request, enqueue_contact_request,
+from .notifications import (enqueue_booking_change, enqueue_booking_decision, enqueue_booking_request, enqueue_contact_request, refresh_booking_request,
                             notify_admin_of_booking_request, notify_admin_of_contact_request,
                             notify_student_of_booking_decision, notification_settings)
 from .security import admin_user, create_token, current_user, hash_password, verify_password
@@ -484,7 +485,23 @@ def booking_data(booking: models.Booking, viewer: models.User, include_user: boo
     return data
 
 
+def ensure_weekday_booking(starts_at: datetime, ends_at: datetime) -> None:
+    local_start = starts_at.astimezone(ZoneInfo("Europe/Madrid"))
+    saturday = (local_start + timedelta(days=5 - local_start.weekday())).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    if local_start.weekday() >= 5 or ends_at > saturday.astimezone(timezone.utc):
+        raise HTTPException(400, "No se pueden solicitar clases en fin de semana")
+
+
+def lock_booking_schedule(db: Session) -> None:
+    # Acquire before booking row locks; requires PostgreSQL READ COMMITTED.
+    if db.get_bind().dialect.name == "postgresql":
+        db.execute(text("SELECT pg_advisory_xact_lock(1128811842, 1)"))
+
+
 def booking_conflicts(starts_at: datetime, ends_at: datetime, db: Session, exclude_id: int | None = None) -> bool:
+    lock_booking_schedule(db)
     statement = select(models.Booking).where(
         models.Booking.status.in_(BOOKING_ACTIVE_STATUSES),
         models.Booking.starts_at < ends_at,
@@ -506,14 +523,15 @@ def public_bookings(db: Session = Depends(get_db)):
 
 @app.post("/public/trial-bookings", response_model=schemas.PublicBookingOut, status_code=201)
 def request_public_trial_booking(data: schemas.PublicTrialBookingCreate, db: Session = Depends(get_db)):
-    starts_at = aware(data.starts_at)
+    starts_at = aware(data.starts_at).astimezone(timezone.utc)
     if starts_at <= datetime.now(timezone.utc):
         raise HTTPException(400, "Solo puedes reservar franjas futuras")
-    if starts_at.minute not in {0, 30} or starts_at.second or starts_at.microsecond:
+    if data.starts_at.minute not in {0, 30} or data.starts_at.second or data.starts_at.microsecond:
         raise HTTPException(400, "La clase debe comenzar en una franja de 30 minutos")
     if data.subject not in BOOKING_SUBJECTS:
         raise HTTPException(400, "Selecciona una asignatura válida")
     ends_at = starts_at + timedelta(hours=1)
+    ensure_weekday_booking(starts_at, ends_at)
     if booking_conflicts(starts_at, ends_at, db):
         raise HTTPException(409, "Esta hora ya no está disponible")
     booking = models.Booking(guest_name=data.name.strip(), guest_email=data.email.lower(), starts_at=starts_at, ends_at=ends_at,
@@ -546,14 +564,15 @@ def bookings(user: models.User = Depends(current_user), db: Session = Depends(ge
 
 @app.post("/bookings", response_model=schemas.BookingOut, status_code=201)
 def request_booking(data: schemas.BookingCreate, user: models.User = Depends(current_user), db: Session = Depends(get_db)):
-    starts_at = aware(data.starts_at)
+    starts_at = aware(data.starts_at).astimezone(timezone.utc)
     if starts_at <= datetime.now(timezone.utc):
         raise HTTPException(400, "Solo puedes reservar franjas futuras")
-    if starts_at.minute not in {0, 30} or starts_at.second or starts_at.microsecond:
+    if data.starts_at.minute not in {0, 30} or data.starts_at.second or data.starts_at.microsecond:
         raise HTTPException(400, "Las clases deben comenzar en una franja de 30 minutos")
     if data.subject not in BOOKING_SUBJECTS:
         raise HTTPException(400, "Selecciona una asignatura válida")
     ends_at = starts_at + timedelta(minutes=30 * data.duration_slots)
+    ensure_weekday_booking(starts_at, ends_at)
     if booking_conflicts(starts_at, ends_at, db):
         raise HTTPException(409, "Esta franja ya no está disponible")
     booking = models.Booking(user_id=user.id, starts_at=starts_at, ends_at=ends_at,
@@ -566,13 +585,13 @@ def request_booking(data: schemas.BookingCreate, user: models.User = Depends(cur
 
 @app.post("/bookings/{booking_id}/cancel", response_model=schemas.BookingOut)
 def cancel_booking(booking_id: int, user: models.User = Depends(current_user), db: Session = Depends(get_db)):
-    booking = db.get(models.Booking, booking_id)
+    booking = db.scalar(select(models.Booking).where(models.Booking.id == booking_id).with_for_update())
     if not booking or booking.user_id != user.id:
         raise HTTPException(404, "Reserva no encontrada")
     if booking.status not in {"requested", "confirmed"}:
         raise HTTPException(400, "Esta reserva no se puede cancelar")
-    if booking.status == "confirmed" and aware(booking.starts_at) < datetime.now(timezone.utc) + timedelta(hours=24):
-        raise HTTPException(400, "Para cancelar una clase con menos de 24 horas, contacta con la administradora")
+    if booking.status == "confirmed" and aware(booking.starts_at) <= datetime.now(timezone.utc) + timedelta(hours=24):
+        raise HTTPException(400, "Para cancelar una clase con 24 horas o menos de antelación, contacta con el profesor")
     booking.status = "cancelled"
     enqueue_booking_change(db, booking, "Clase cancelada")
     db.commit(); db.refresh(booking)
@@ -584,7 +603,7 @@ def booking_requests(admin: models.User = Depends(admin_user), db: Session = Dep
     rows = list(db.scalars(select(models.Booking).where(models.Booking.status == "requested")
                            .order_by(models.Booking.starts_at)))
     return [{**booking_data(booking, admin, include_user=True),
-             "user_email": booking.user.email if booking.user else None} for booking in rows]
+             "user_email": booking.user.email if booking.user else booking.guest_email} for booking in rows]
 
 
 @app.patch("/admin/bookings/{booking_id}", response_model=schemas.BookingOut)
@@ -592,7 +611,8 @@ def update_booking_status(booking_id: int, data: schemas.BookingStatusUpdate,
                           admin: models.User = Depends(admin_user), db: Session = Depends(get_db)):
     if data.status not in {"confirmed", "declined"}:
         raise HTTPException(400, "Estado de reserva no válido")
-    booking = db.get(models.Booking, booking_id)
+    lock_booking_schedule(db)
+    booking = db.scalar(select(models.Booking).where(models.Booking.id == booking_id).with_for_update())
     if not booking or booking.status != "requested":
         raise HTTPException(404, "Solicitud de reserva no encontrada")
     if data.status == "confirmed" and booking_conflicts(booking.starts_at, booking.ends_at, db, booking.id):
@@ -607,7 +627,7 @@ def update_booking_status(booking_id: int, data: schemas.BookingStatusUpdate,
 def block_booking_range(data: schemas.BookingBlockCreate, admin: models.User = Depends(admin_user), db: Session = Depends(get_db)):
     if data.status not in {"blocked", "unavailable"}:
         raise HTTPException(400, "Elige Ocupado o No disponible")
-    starts_at, ends_at = aware(data.starts_at), aware(data.ends_at)
+    starts_at, ends_at = aware(data.starts_at).astimezone(timezone.utc), aware(data.ends_at).astimezone(timezone.utc)
     if ends_at <= starts_at:
         raise HTTPException(400, "La hora de fin debe ser posterior a la de inicio")
     if booking_conflicts(starts_at, ends_at, db):
@@ -629,12 +649,13 @@ def unblock_booking_range(booking_id: int, _: models.User = Depends(admin_user),
 @app.patch("/admin/bookings/{booking_id}/block", response_model=schemas.BookingOut)
 def update_blocked_range(booking_id: int, data: schemas.BookingBlockCreate,
                          admin: models.User = Depends(admin_user), db: Session = Depends(get_db)):
+    lock_booking_schedule(db)
     booking = db.get(models.Booking, booking_id)
     if not booking or booking.user_id is not None or booking.status not in {"blocked", "unavailable"}:
         raise HTTPException(404, "Bloqueo no encontrado")
     if data.status not in {"blocked", "unavailable"}:
         raise HTTPException(400, "Elige Ocupado o No disponible")
-    starts_at, ends_at = aware(data.starts_at), aware(data.ends_at)
+    starts_at, ends_at = aware(data.starts_at).astimezone(timezone.utc), aware(data.ends_at).astimezone(timezone.utc)
     if ends_at <= starts_at:
         raise HTTPException(400, "La hora de fin debe ser posterior a la de inicio")
     if booking_conflicts(starts_at, ends_at, db, booking.id):
@@ -648,10 +669,10 @@ def update_blocked_range(booking_id: int, data: schemas.BookingBlockCreate,
 @app.post("/admin/classes", response_model=schemas.ClassOut, status_code=201)
 def create_admin_class(data: schemas.AdminBookingCreate, _: models.User = Depends(admin_user), db: Session = Depends(get_db)):
     student = db.get(models.User, data.user_id)
-    starts_at = aware(data.starts_at)
+    starts_at = aware(data.starts_at).astimezone(timezone.utc)
     if not student or student.role == "admin":
         raise HTTPException(404, "Alumno no encontrado")
-    if starts_at.minute not in {0, 30} or starts_at.second or starts_at.microsecond:
+    if data.starts_at.minute not in {0, 30} or data.starts_at.second or data.starts_at.microsecond:
         raise HTTPException(400, "La clase debe comenzar en una franja de 30 minutos")
     if data.subject not in BOOKING_SUBJECTS:
         raise HTTPException(400, "Selecciona una asignatura válida")
@@ -665,13 +686,14 @@ def create_admin_class(data: schemas.AdminBookingCreate, _: models.User = Depend
 
 @app.patch("/admin/classes/{booking_id}", response_model=schemas.ClassOut)
 def update_admin_class(booking_id: int, data: schemas.AdminClassUpdate, _: models.User = Depends(admin_user), db: Session = Depends(get_db)):
-    booking = db.get(models.Booking, booking_id)
-    starts_at = aware(data.starts_at)
-    if not booking or not booking.user:
+    lock_booking_schedule(db)
+    booking = db.scalar(select(models.Booking).where(models.Booking.id == booking_id).with_for_update())
+    starts_at = aware(data.starts_at).astimezone(timezone.utc)
+    if not booking or booking.status in {"blocked", "unavailable"} or not (booking.user_id is not None or booking.guest_name or booking.guest_email):
         raise HTTPException(404, "Clase no encontrada")
     if booking.status not in {"requested", "confirmed"}:
         raise HTTPException(400, "Solo se pueden editar clases reservadas o confirmadas")
-    if starts_at.minute not in {0, 30} or starts_at.second or starts_at.microsecond:
+    if data.starts_at.minute not in {0, 30} or data.starts_at.second or data.starts_at.microsecond:
         raise HTTPException(400, "La clase debe comenzar en una franja de 30 minutos")
     if data.subject not in BOOKING_SUBJECTS:
         raise HTTPException(400, "Selecciona una asignatura válida")
@@ -679,19 +701,24 @@ def update_admin_class(booking_id: int, data: schemas.AdminClassUpdate, _: model
     if booking_conflicts(starts_at, ends_at, db, booking.id):
         raise HTTPException(409, "Ese horario no está disponible")
     previous_start = booking.starts_at
+    changed = (aware(booking.starts_at) != starts_at or aware(booking.ends_at) != ends_at or booking.note != data.subject)
     booking.starts_at, booking.ends_at, booking.note = starts_at, ends_at, data.subject
     booking.admin_comment = data.admin_comment.strip()
-    if booking.status == "confirmed":
+    if changed and booking.status == "confirmed":
         enqueue_booking_change(db, booking, "Clase reprogramada", previous_start)
+    elif changed and booking.status == "requested":
+        refresh_booking_request(db, booking)
     db.commit(); db.refresh(booking)
     return class_data(booking)
 
 
 @app.post("/admin/classes/{booking_id}/cancel", response_model=schemas.ClassOut)
 def cancel_admin_class(booking_id: int, _: models.User = Depends(admin_user), db: Session = Depends(get_db)):
-    booking = db.get(models.Booking, booking_id)
-    if not booking or not booking.user:
+    booking = db.scalar(select(models.Booking).where(models.Booking.id == booking_id).with_for_update())
+    if not booking or booking.status in {"blocked", "unavailable"} or not (booking.user_id is not None or booking.guest_name or booking.guest_email):
         raise HTTPException(404, "Clase no encontrada")
+    if booking.status not in {"requested", "confirmed"}:
+        raise HTTPException(400, "Esta reserva no se puede cancelar")
     booking.status = "cancelled"
     enqueue_booking_change(db, booking, "Clase cancelada")
     db.commit(); db.refresh(booking)
@@ -699,7 +726,7 @@ def cancel_admin_class(booking_id: int, _: models.User = Depends(admin_user), db
 
 
 def class_data(booking: models.Booking) -> dict:
-    if not booking.user:
+    if not (booking.user_id is not None or booking.guest_name or booking.guest_email) or booking.status in {"blocked", "unavailable"}:
         raise HTTPException(400, "Este bloqueo no corresponde a una clase de alumno")
     return {
         "id": booking.id,
@@ -709,9 +736,9 @@ def class_data(booking: models.Booking) -> dict:
         "is_historical": booking.is_historical,
         "topic": booking.note or "Clase particular",
         "admin_comment": booking.admin_comment,
-        "user_id": booking.user.id,
-        "user_name": booking.user.name,
-        "user_email": booking.user.email,
+        "user_id": booking.user_id,
+        "user_name": booking.user.name if booking.user else booking.guest_name,
+        "user_email": booking.user.email if booking.user else booking.guest_email,
         "materials": [
             {"id": link.material.id, "title": link.material.title, "filename": link.material.filename,
              "kind": link.material.kind}
@@ -722,8 +749,10 @@ def class_data(booking: models.Booking) -> dict:
 
 @app.get("/admin/classes", response_model=list[schemas.ClassOut])
 def classes(_: models.User = Depends(admin_user), db: Session = Depends(get_db)):
-    rows = list(db.scalars(select(models.Booking).where(models.Booking.user_id.is_not(None))
-                           .order_by(models.Booking.starts_at.desc())))
+    rows = list(db.scalars(select(models.Booking).where(
+        models.Booking.status.notin_({"blocked", "unavailable"}),
+        (models.Booking.user_id.is_not(None) | models.Booking.guest_name.is_not(None) | models.Booking.guest_email.is_not(None)),
+    ).order_by(models.Booking.starts_at.desc())))
     return [class_data(booking) for booking in rows]
 
 
@@ -738,7 +767,7 @@ def my_classes(user: models.User = Depends(current_user), db: Session = Depends(
 def set_class_historical(booking_id: int, data: schemas.ClassHistoricalUpdate,
                          _: models.User = Depends(admin_user), db: Session = Depends(get_db)):
     booking = db.get(models.Booking, booking_id)
-    if not booking or not booking.user:
+    if not booking or booking.status in {"blocked", "unavailable"} or not (booking.user_id is not None or booking.guest_name or booking.guest_email):
         raise HTTPException(404, "Clase no encontrada")
     booking.is_historical = data.is_historical
     db.commit(); db.refresh(booking)
@@ -748,7 +777,7 @@ def set_class_historical(booking_id: int, data: schemas.ClassHistoricalUpdate,
 @app.delete("/admin/classes/{booking_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_class(booking_id: int, _: models.User = Depends(admin_user), db: Session = Depends(get_db)):
     booking = db.get(models.Booking, booking_id)
-    if not booking or not booking.user:
+    if not booking or booking.status in {"blocked", "unavailable"} or not (booking.user_id is not None or booking.guest_name or booking.guest_email):
         raise HTTPException(404, "Clase no encontrada")
     is_future = aware(booking.starts_at) > datetime.now(timezone.utc)
     if booking.status != "declined" and not is_future:

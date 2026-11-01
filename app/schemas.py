@@ -273,7 +273,7 @@ class ClassOut(BaseModel):
     is_historical: bool = False
     topic: str
     admin_comment: str = ""
-    user_id: int
-    user_name: str
-    user_email: EmailStr
+    user_id: int | None
+    user_name: str | None
+    user_email: EmailStr | None
     materials: list[SharedMaterialOut] = []
