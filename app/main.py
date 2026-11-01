@@ -494,6 +494,13 @@ def ensure_weekday_booking(starts_at: datetime, ends_at: datetime) -> None:
         raise HTTPException(400, "No se pueden solicitar clases en fin de semana")
 
 
+def ensure_class_hours(starts_at: datetime, ends_at: datetime) -> None:
+    madrid = ZoneInfo("Europe/Madrid")
+    local_start, local_end = starts_at.astimezone(madrid), ends_at.astimezone(madrid)
+    if local_start.date() != local_end.date() or (local_end.hour, local_end.minute, local_end.second, local_end.microsecond) > (21, 0, 0, 0):
+        raise HTTPException(400, "La clase debe terminar el mismo día, como máximo a las 21:00 (hora de Madrid)")
+
+
 def lock_booking_schedule(db: Session) -> None:
     # Acquire before booking row locks; requires PostgreSQL READ COMMITTED.
     if db.get_bind().dialect.name == "postgresql":
@@ -532,6 +539,7 @@ def request_public_trial_booking(data: schemas.PublicTrialBookingCreate, db: Ses
         raise HTTPException(400, "Selecciona una asignatura válida")
     ends_at = starts_at + timedelta(hours=1)
     ensure_weekday_booking(starts_at, ends_at)
+    ensure_class_hours(starts_at, ends_at)
     if booking_conflicts(starts_at, ends_at, db):
         raise HTTPException(409, "Esta hora ya no está disponible")
     booking = models.Booking(guest_name=data.name.strip(), guest_email=data.email.lower(), starts_at=starts_at, ends_at=ends_at,
@@ -573,6 +581,7 @@ def request_booking(data: schemas.BookingCreate, user: models.User = Depends(cur
         raise HTTPException(400, "Selecciona una asignatura válida")
     ends_at = starts_at + timedelta(minutes=30 * data.duration_slots)
     ensure_weekday_booking(starts_at, ends_at)
+    ensure_class_hours(starts_at, ends_at)
     if booking_conflicts(starts_at, ends_at, db):
         raise HTTPException(409, "Esta franja ya no está disponible")
     booking = models.Booking(user_id=user.id, starts_at=starts_at, ends_at=ends_at,
@@ -592,8 +601,9 @@ def cancel_booking(booking_id: int, user: models.User = Depends(current_user), d
         raise HTTPException(400, "Esta reserva no se puede cancelar")
     if booking.status == "confirmed" and aware(booking.starts_at) <= datetime.now(timezone.utc) + timedelta(hours=24):
         raise HTTPException(400, "Para cancelar una clase con 24 horas o menos de antelación, contacta con el profesor")
+    was_pending = booking.status == "requested"
     booking.status = "cancelled"
-    enqueue_booking_change(db, booking, "Clase cancelada")
+    enqueue_booking_change(db, booking, "Clase cancelada", was_pending=was_pending)
     db.commit(); db.refresh(booking)
     return booking_data(booking, user)
 
@@ -677,6 +687,7 @@ def create_admin_class(data: schemas.AdminBookingCreate, _: models.User = Depend
     if data.subject not in BOOKING_SUBJECTS:
         raise HTTPException(400, "Selecciona una asignatura válida")
     ends_at = starts_at + timedelta(minutes=30 * data.duration_slots)
+    ensure_class_hours(starts_at, ends_at)
     if booking_conflicts(starts_at, ends_at, db):
         raise HTTPException(409, "Ese horario no está disponible")
     booking = models.Booking(user_id=student.id, starts_at=starts_at, ends_at=ends_at, status="confirmed", note=data.subject, admin_comment=data.admin_comment.strip())
@@ -698,6 +709,7 @@ def update_admin_class(booking_id: int, data: schemas.AdminClassUpdate, _: model
     if data.subject not in BOOKING_SUBJECTS:
         raise HTTPException(400, "Selecciona una asignatura válida")
     ends_at = starts_at + timedelta(minutes=30 * data.duration_slots)
+    ensure_class_hours(starts_at, ends_at)
     if booking_conflicts(starts_at, ends_at, db, booking.id):
         raise HTTPException(409, "Ese horario no está disponible")
     previous_start = booking.starts_at
@@ -719,8 +731,9 @@ def cancel_admin_class(booking_id: int, _: models.User = Depends(admin_user), db
         raise HTTPException(404, "Clase no encontrada")
     if booking.status not in {"requested", "confirmed"}:
         raise HTTPException(400, "Esta reserva no se puede cancelar")
+    was_pending = booking.status == "requested"
     booking.status = "cancelled"
-    enqueue_booking_change(db, booking, "Clase cancelada")
+    enqueue_booking_change(db, booking, "Clase cancelada", was_pending=was_pending)
     db.commit(); db.refresh(booking)
     return class_data(booking)
 

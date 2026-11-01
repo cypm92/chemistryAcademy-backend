@@ -41,6 +41,85 @@ class BookingPolicyTest(unittest.TestCase):
     def headers(self, user):
         return {'Authorization': f'Bearer {create_token(user)}'}
 
+    @patch('app.main.datetime', PolicyDatetime)
+    def test_class_end_limit_all_endpoints_and_rejection_is_atomic(self):
+        cases = [
+            ('2030-01-02T19:00:00+00:00', 201),  # 21:00 Madrid
+            ('2030-01-02T19:30:00+00:00', 400),  # 21:30
+            ('2030-07-02T18:00:00+00:00', 201),
+            ('2030-07-02T18:30:00+00:00', 400),
+            ('2030-01-02T22:30:00+00:00', 400),
+        ]
+        for endpoint in ('student', 'guest', 'admin_create', 'admin_edit'):
+            for start, expected in cases:
+                with self.subTest(endpoint=endpoint, start=start):
+                    with self.sessions() as db:
+                        db.query(models.NotificationEvent).delete(); db.query(models.Booking).delete(); db.commit()
+                        booking_id = None
+                        if endpoint == 'admin_edit':
+                            b = models.Booking(user_id=self.student, starts_at=datetime(2030, 1, 1, 10, tzinfo=timezone.utc), ends_at=datetime(2030, 1, 1, 11, tzinfo=timezone.utc), status='confirmed', note='Química ESO', admin_comment='original')
+                            db.add(b); db.commit(); booking_id = b.id
+                        before = [(b.id, b.starts_at, b.ends_at, b.status, b.note, b.admin_comment) for b in db.scalars(select(models.Booking))]
+                        events_before = list(db.scalars(select(models.NotificationEvent)))
+                    body = {'subject': 'Química ESO', 'starts_at': start, 'duration_slots': 2}
+                    if endpoint == 'student':
+                        response = self.client.post('/bookings', headers=self.headers(self.student), json=body)
+                    elif endpoint == 'guest':
+                        response = self.client.post('/public/trial-bookings', json={**body, 'name': 'Guest', 'email': 'guest@example.com'})
+                    elif endpoint == 'admin_create':
+                        response = self.client.post('/admin/classes', headers=self.headers(self.admin), json={**body, 'user_id': self.student})
+                    else:
+                        response = self.client.patch(f'/admin/classes/{booking_id}', headers=self.headers(self.admin), json={**body, 'admin_comment': 'changed'})
+                    self.assertEqual(response.status_code, 200 if endpoint == 'admin_edit' and expected == 201 else expected, response.text)
+                    if expected == 400:
+                        with self.sessions() as db:
+                            self.assertEqual([(b.id, b.starts_at, b.ends_at, b.status, b.note, b.admin_comment) for b in db.scalars(select(models.Booking))], before)
+                            self.assertEqual(len(list(db.scalars(select(models.NotificationEvent)))), len(events_before))
+
+    @patch('app.main.datetime', PolicyDatetime)
+    def test_rejected_edit_preserves_existing_request_and_outbox(self):
+        created = self.client.post('/public/trial-bookings', json={
+            'subject': 'Química ESO', 'starts_at': '2030-01-02T10:00:00+00:00',
+            'name': 'Guest', 'email': 'guest@example.com'})
+        self.assertEqual(created.status_code, 201, created.text)
+        booking_id = created.json()['id']
+        with self.sessions() as db:
+            booking = db.get(models.Booking, booking_id)
+            before = (booking.starts_at, booking.ends_at, booking.status, booking.note, booking.guest_email)
+            events = [(e.id, e.status, e.logical_key, e.recipient, e.subject, e.body, e.attempts) for e in db.scalars(select(models.NotificationEvent))]
+            self.assertTrue(events)
+        with patch('app.notifications._send') as send:
+            response = self.client.patch(f'/admin/classes/{booking_id}', headers=self.headers(self.admin), json={
+                'subject': 'Física ESO', 'starts_at': '2030-01-02T19:30:00+00:00', 'duration_slots': 2})
+            self.assertEqual(response.status_code, 400, response.text)
+            send.assert_not_called()
+        with self.sessions() as db:
+            booking = db.get(models.Booking, booking_id)
+            self.assertEqual((booking.starts_at, booking.ends_at, booking.status, booking.note, booking.guest_email), before)
+            self.assertEqual([(e.id, e.status, e.logical_key, e.recipient, e.subject, e.body, e.attempts) for e in db.scalars(select(models.NotificationEvent))], events)
+
+    def test_cancellation_message_distinguishes_pending_and_confirmed(self):
+        for status, kind in [('requested', 'student'), ('requested', 'admin_guest'), ('confirmed', 'student')]:
+            with self.subTest(status=status, kind=kind):
+                with self.sessions() as db:
+                    db.query(models.NotificationEvent).delete(); db.query(models.Booking).delete(); db.commit()
+                    start = datetime.now(timezone.utc) + timedelta(days=3)
+                    data = {'user_id': self.student} if kind == 'student' else {'guest_name': 'Ana', 'guest_email': 'ana@example.com'}
+                    booking = models.Booking(**data, starts_at=start, ends_at=start + timedelta(hours=1), status=status, note='Química ESO')
+                    db.add(booking); db.commit(); booking_id = booking.id
+                path = f'/bookings/{booking_id}/cancel' if kind == 'student' else f'/admin/classes/{booking_id}/cancel'
+                response = self.client.post(path, headers=self.headers(self.student if kind == 'student' else self.admin))
+                self.assertEqual(response.status_code, 200, response.text)
+                with self.sessions() as db:
+                    event = db.scalar(select(models.NotificationEvent).where(models.NotificationEvent.logical_key.like(f'booking:{booking_id}:%:student')))
+                    if status == 'requested':
+                        self.assertIn('solicitud', event.subject.lower())
+                        self.assertIn('solicitud', event.body.lower())
+                        self.assertIn('pendiente', event.body.lower())
+                    else:
+                        self.assertEqual(event.subject, 'Clase cancelada')
+                        self.assertIn('clase ha sido cancelada', event.body)
+
     def test_weekend_request_rejected_for_registered_and_guest(self):
         now = datetime.now(timezone.utc)
         saturday = (now + timedelta(days=(5 - now.weekday()) % 7 + 7)).replace(hour=12, minute=0, second=0, microsecond=0)
@@ -97,10 +176,12 @@ class BookingPolicyTest(unittest.TestCase):
                     with self.sessions() as db:
                         db.query(models.NotificationEvent).delete(); db.query(models.Booking).delete(); db.commit()
                     payload = {'subject': 'Química ESO', 'starts_at': start}
-                    if registered:
-                        response = self.client.post('/bookings', headers=self.headers(self.student), json={**payload, 'duration_slots': 1})
-                    else:
-                        response = self.client.post('/public/trial-bookings', json={**payload, 'name': 'Guest', 'email': 'guest@example.com'})
+                    # Isolate the independent weekday boundary from the class end limit.
+                    with patch('app.main.ensure_class_hours'):
+                        if registered:
+                            response = self.client.post('/bookings', headers=self.headers(self.student), json={**payload, 'duration_slots': 1})
+                        else:
+                            response = self.client.post('/public/trial-bookings', json={**payload, 'name': 'Guest', 'email': 'guest@example.com'})
                     guest_crosses_midnight = not registered and start in {'2030-01-04T22:30:00+00:00', '2030-07-05T21:30:00+00:00'}
                     self.assertEqual(response.status_code, 400 if guest_crosses_midnight else expected, response.text)
 
@@ -110,7 +191,8 @@ class BookingPolicyTest(unittest.TestCase):
             with self.subTest(start=start):
                 with self.sessions() as db:
                     db.query(models.NotificationEvent).delete(); db.query(models.Booking).delete(); db.commit()
-                response = self.client.post('/public/trial-bookings', json={'subject': 'Química ESO', 'starts_at': start, 'name': 'Guest', 'email': 'guest@example.com'})
+                with patch('app.main.ensure_class_hours'):
+                    response = self.client.post('/public/trial-bookings', json={'subject': 'Química ESO', 'starts_at': start, 'name': 'Guest', 'email': 'guest@example.com'})
                 self.assertEqual(response.status_code, 201, response.text)
 
     @patch('app.main.datetime', PolicyDatetime)
