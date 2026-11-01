@@ -124,12 +124,13 @@ class NotificationSettingsTest(unittest.TestCase):
             events = list(db.scalars(select(models.NotificationEvent)))
             self.assertEqual(len(events), 6)
             for event in events:
-                self.assertIn("25/10/2026 02:30 UTC+02:00 (hora peninsular española; Europe/Madrid)", event.body)
-                self.assertIn("25/10/2026 02:30 UTC+01:00 (hora peninsular española; Europe/Madrid)", event.body)
+                self.assertIn("domingo 25 de octubre de 2026 a las 02:30 (UTC+02:00)", event.body)
+                self.assertIn("domingo 25 de octubre de 2026 a las 02:30 (UTC+01:00)", event.body)
+                self.assertIn("hora de Madrid", event.body)
             changes = [event for event in events if event.subject == "Clase reprogramada"]
             self.assertEqual(len(changes), 2)
             for event in changes:
-                self.assertIn("24/10/2026 02:30 UTC+02:00 (hora peninsular española; Europe/Madrid)", event.body)
+                self.assertIn("sábado 24 de octubre de 2026, a las 02:30 (hora de Madrid)", event.body)
 
     def test_booking_request_is_durable_and_deduplicated(self):
         start = datetime.now(timezone.utc).replace(second=0, microsecond=0) + timedelta(days=3)
@@ -327,7 +328,7 @@ class NotificationSettingsTest(unittest.TestCase):
 
     def test_requested_edit_replaces_stale_requests(self):
         from app.notifications import enqueue_booking_request
-        start = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0) + timedelta(days=3)
+        start = (datetime.now(timezone.utc) + timedelta(days=3)).replace(hour=10, minute=0, second=0, microsecond=0)
         with self.sessions() as db:
             booking = models.Booking(user_id=self.student_id, starts_at=start, ends_at=start + timedelta(hours=1), status="requested", note="Química")
             db.add(booking); db.flush(); enqueue_booking_request(db, booking); db.commit(); booking_id = booking.id
