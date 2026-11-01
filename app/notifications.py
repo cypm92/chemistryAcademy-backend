@@ -6,8 +6,10 @@ when real email delivery is enabled later.
 import logging
 import json
 import smtplib
+from uuid import uuid4
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
+from html import escape
 from zoneinfo import ZoneInfo
 from sqlalchemy import or_, select, update
 from . import models
@@ -29,7 +31,9 @@ def notification_settings(db):
 def local_time(value):
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
-    return value.astimezone(MADRID).strftime("%d/%m/%Y %H:%M")
+    local = value.astimezone(MADRID)
+    offset = local.strftime("%z")
+    return f"{local:%d/%m/%Y %H:%M} UTC{offset[:3]}:{offset[3:]} (hora peninsular española; Europe/Madrid)"
 
 
 def enqueue(db, logical_key, recipient, subject, body):
@@ -37,31 +41,49 @@ def enqueue(db, logical_key, recipient, subject, body):
         db.add(models.NotificationEvent(logical_key=logical_key, recipient=recipient, subject=subject, body=body))
 
 
-def enqueue_booking_request(db, booking):
+def enqueue_booking_request(db, booking, revision=None):
     name = booking.user.name if booking.user else (booking.guest_name or "")
     email = booking.user.email if booking.user else booking.guest_email
     body = f"Nueva solicitud de {name}: {local_time(booking.starts_at)}–{local_time(booking.ends_at)} ({booking.note})"
+    suffix = f":{revision}" if revision else ""
     for address in DEFAULT_RECIPIENTS:
-        enqueue(db, f"booking:{booking.id}:requested:admin:{address}", address, "Nueva solicitud de clase", body)
-    enqueue(db, f"booking:{booking.id}:requested:student", email, "Solicitud de clase recibida", body)
+        enqueue(db, f"booking:{booking.id}:requested:admin:{address}{suffix}", address, "Nueva solicitud de clase", body)
+    student_body = f"Tu solicitud está pendiente de confirmación. {body}"
+    enqueue(db, f"booking:{booking.id}:requested:student{suffix}", email, "Solicitud de clase recibida", student_body)
+
+
+def _invalidate_booking_events(db, booking_id, kinds):
+    prefix = f"booking:{booking_id}:"
+    db.execute(update(models.NotificationEvent).where(
+        or_(*(models.NotificationEvent.logical_key.like(prefix + kind + ":%") for kind in kinds)),
+        models.NotificationEvent.status.in_(("pending", "processing")),
+    ).values(status="cancelled", lease_expires_at=None))
+
+
+def refresh_booking_request(db, booking):
+    _invalidate_booking_events(db, booking.id, ("requested",))
+    enqueue_booking_request(db, booking, uuid4().hex)
 
 
 def enqueue_booking_decision(db, booking):
+    _invalidate_booking_events(db, booking.id, ("requested",))
     email = booking.user.email if booking.user else booking.guest_email
-    body = f"Solicitud {booking.status}: {local_time(booking.starts_at)}–{local_time(booking.ends_at)} ({booking.note})"
-    enqueue(db, f"booking:{booking.id}:{booking.status}:student", email, "Actualización de tu solicitud", body)
+    subject = "Clase confirmada" if booking.status == "confirmed" else "Solicitud de clase rechazada"
+    body = f"{subject}: {local_time(booking.starts_at)}–{local_time(booking.ends_at)} ({booking.note})"
+    enqueue(db, f"booking:{booking.id}:{booking.status}:student", email, subject, body)
 
 
 def enqueue_booking_change(db, booking, action, previous_start=None):
-    for event in db.scalars(select(models.NotificationEvent).where(
-        models.NotificationEvent.logical_key.like(f"booking:{booking.id}:reminder:%"),
-        models.NotificationEvent.status == "pending")):
-        event.status = "cancelled"
+    _invalidate_booking_events(db, booking.id,
+        ("requested", "confirmed", "declined", "reminder", "Clase reprogramada"))
     email = booking.user.email if booking.user else booking.guest_email
     body = f"{action}: {local_time(booking.starts_at)}–{local_time(booking.ends_at)} ({booking.note})"
     if previous_start:
         body += f"; horario anterior: {local_time(previous_start)}"
-    key = f"booking:{booking.id}:{action}:{booking.starts_at.isoformat()}"
+    start = booking.starts_at
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=timezone.utc)
+    key = f"booking:{booking.id}:{action}:{start.astimezone(timezone.utc).isoformat()}~{uuid4().hex}"
     enqueue(db, key + ":student", email, action, body)
     for address in DEFAULT_RECIPIENTS:
         enqueue(db, key + ":admin:" + address, address, action, body)
@@ -74,6 +96,19 @@ def _send(event):
     message = EmailMessage()
     message["From"], message["To"], message["Subject"] = settings.smtp_sender, event.recipient, event.subject
     message.set_content(event.body)
+    # Render the persisted text at delivery time, including legacy outbox rows.
+    # Dynamic values are text only: never interpolate them into attributes or URLs.
+    title = escape(event.subject)
+    body = escape(event.body).replace("\n", "<br>\n")
+    message.add_alternative(f'''<!doctype html>
+<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"></head>
+<body style="margin:0;padding:0;background-color:#f3f6f8;font-family:Arial,Helvetica,sans-serif;color:#233242;">
+<table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background-color:#f3f6f8;"><tr><td align="center" style="padding:24px 12px;">
+<table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:600px;background-color:#ffffff;">
+<tr><td style="background-color:#153d49;padding:24px 28px;color:#ffffff;font-size:22px;font-weight:bold;">BeCiencia</td></tr>
+<tr><td style="padding:28px;line-height:1.6;font-size:16px;"><h1 style="font-size:22px;line-height:1.3;margin:0 0 20px;color:#153d49;">{title}</h1><p style="margin:0;">{body}</p></td></tr>
+<tr><td style="padding:20px 28px;border-top:1px solid #e3e9eb;color:#64747a;font-size:13px;">BeCiencia · Notificación de la academia</td></tr>
+</table></td></tr></table></body></html>''', subtype="html")
     transport = smtplib.SMTP_SSL if settings.smtp_ssl else smtplib.SMTP
     with transport(settings.smtp_host, settings.smtp_port, timeout=15) as smtp:
         if settings.smtp_starttls and not settings.smtp_ssl:
@@ -81,6 +116,37 @@ def _send(event):
         if settings.smtp_username:
             smtp.login(settings.smtp_username, settings.smtp_password)
         smtp.send_message(message)
+    return True
+
+
+def _booking_event_current(db, event):
+    parts = event.logical_key.split(":", 3)
+    if len(parts) < 4 or parts[0] != "booking" or not parts[1].isdigit():
+        return True
+    kind = parts[2]
+    expected = {"requested": "requested", "confirmed": "confirmed", "declined": "declined",
+                "reminder": "confirmed", "Clase reprogramada": "confirmed", "Clase cancelada": "cancelled"}
+    if kind not in expected:
+        return True
+    booking = db.get(models.Booking, int(parts[1]), populate_existing=True)
+    if not booking:
+        return kind == "Clase cancelada"
+    if booking.status != expected[kind]:
+        return False
+    if kind in {"reminder", "Clase reprogramada", "Clase cancelada"}:
+        stamp = parts[3]
+        if kind != "reminder":
+            stamp = stamp.rsplit(":student", 1)[0].rsplit(":admin:", 1)[0]
+        try:
+            value = datetime.fromisoformat(stamp.split("~", 1)[0])
+            current = booking.starts_at
+            if value.tzinfo is None:
+                value = value.replace(tzinfo=timezone.utc)
+            if current.tzinfo is None:
+                current = current.replace(tzinfo=timezone.utc)
+            return value == current and (kind != "reminder" or current > datetime.now(timezone.utc))
+        except ValueError:
+            return False
     return True
 
 
@@ -103,20 +169,47 @@ def deliver_pending(session_factory, batch_size=50):
             db.commit()
             if not result.rowcount:
                 continue
-            event = db.get(models.NotificationEvent, event_id)
+            event = db.scalar(select(models.NotificationEvent).where(
+                models.NotificationEvent.id == event_id,
+                models.NotificationEvent.status == "processing",
+                models.NotificationEvent.lease_expires_at == claimed_at + PROCESSING_LEASE,
+            ).execution_options(populate_existing=True))
+            if not event or event.status != "processing" or not _booking_event_current(db, event):
+                if event and event.status == "processing":
+                    db.execute(update(models.NotificationEvent).where(
+                        models.NotificationEvent.id == event_id,
+                        models.NotificationEvent.status == "processing",
+                        models.NotificationEvent.lease_expires_at == claimed_at + PROCESSING_LEASE,
+                    ).values(status="cancelled", lease_expires_at=None))
+                    db.commit()
+                continue
+            lease = claimed_at + PROCESSING_LEASE
             try:
                 was_sent = _send(event)
-                event.status = "sent" if was_sent else "simulated"
-                event.sent_at = datetime.now(timezone.utc) if was_sent else None
-                event.last_error, event.lease_expires_at = None, None
-                if was_sent:
-                    sent += 1
+                values = dict(status="sent" if was_sent else "simulated",
+                              sent_at=datetime.now(timezone.utc) if was_sent else None,
+                              last_error=None, lease_expires_at=None)
             except Exception as exc:
-                event.attempts += 1
-                event.status, event.last_error, event.lease_expires_at = "pending", str(exc)[:2000], None
-                event.available_at = datetime.now(timezone.utc) + timedelta(seconds=min(3600, 30 * 2 ** min(event.attempts - 1, 7)))
+                attempts = event.attempts + 1
+                values = dict(attempts=attempts, status="pending", last_error=str(exc)[:2000],
+                              lease_expires_at=None, available_at=datetime.now(timezone.utc) +
+                              timedelta(seconds=min(3600, 30 * 2 ** min(attempts - 1, 7))))
+                was_sent = False
                 logger.exception("Email delivery failed for event %s", event.id)
+            result = db.execute(update(models.NotificationEvent).where(
+                models.NotificationEvent.id == event_id,
+                models.NotificationEvent.status == "processing",
+                models.NotificationEvent.lease_expires_at == lease,
+            ).values(**values))
+            if was_sent and not result.rowcount:
+                db.execute(update(models.NotificationEvent).where(
+                    models.NotificationEvent.id == event_id,
+                    models.NotificationEvent.status == "cancelled",
+                    models.NotificationEvent.sent_at.is_(None),
+                ).values(sent_at=values["sent_at"], last_error="SMTP accepted after cancellation"))
             db.commit()
+            if was_sent:
+                sent += 1
     return sent
 
 
@@ -124,12 +217,19 @@ def enqueue_due_reminders(session_factory):
     with session_factory() as db:
         interval = notification_settings(db)["reminder_interval_minutes"]
         now = datetime.now(timezone.utc)
+        # Keep booking snapshot and notification generation in one transaction.
         bookings = list(db.scalars(select(models.Booking).where(models.Booking.status == "confirmed",
-            models.Booking.starts_at > now, models.Booking.starts_at <= now + timedelta(minutes=interval))))
+            models.Booking.starts_at > now, models.Booking.starts_at <= now + timedelta(minutes=interval))
+            .order_by(models.Booking.id).with_for_update()))
         for booking in bookings:
             email = booking.user.email if booking.user else booking.guest_email
             body = f"Recordatorio de clase: {local_time(booking.starts_at)}–{local_time(booking.ends_at)} ({booking.note})"
-            enqueue(db, f"booking:{booking.id}:reminder:{booking.starts_at.isoformat()}", email, "Recordatorio de tu clase", body)
+            latest_change = db.scalar(select(models.NotificationEvent.logical_key).where(
+                models.NotificationEvent.logical_key.like(f"booking:{booking.id}:Clase reprogramada:%")
+            ).order_by(models.NotificationEvent.id.desc()).limit(1))
+            revision = latest_change.split("~", 1)[1].split(":", 1)[0] if latest_change and "~" in latest_change else None
+            suffix = f"~{revision}" if revision else ""
+            enqueue(db, f"booking:{booking.id}:reminder:{booking.starts_at.isoformat()}{suffix}", email, "Recordatorio de tu clase", body)
         db.commit()
         return len(bookings)
 

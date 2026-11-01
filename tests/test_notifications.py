@@ -39,6 +39,23 @@ class NotificationSettingsTest(unittest.TestCase):
         app.dependency_overrides.clear()
         self.engine.dispose()
 
+    def test_deleted_booking_delivers_cancellation_but_not_confirmation(self):
+        from app.notifications import enqueue_booking_change, deliver_pending
+        with self.sessions() as db:
+            start = datetime(2030, 1, 1, tzinfo=timezone.utc)
+            booking = models.Booking(user_id=self.student_id, starts_at=start, ends_at=start + timedelta(hours=1), status='cancelled')
+            db.add(booking); db.flush()
+            enqueue_booking_change(db, booking, 'Clase cancelada')
+            db.add(models.NotificationEvent(logical_key=f'booking:{booking.id}:confirmed:student', recipient='x@example.com', subject='confirmed', body='x'))
+            db.commit(); db.delete(booking); db.commit()
+        with patch('app.notifications._send', return_value=True) as send:
+            deliver_pending(self.sessions)
+        with self.sessions() as db:
+            events = list(db.scalars(select(models.NotificationEvent)))
+            self.assertTrue(all(e.status == ('sent' if e.subject == 'Clase cancelada' else 'cancelled') for e in events))
+            self.assertEqual(send.call_count, sum(e.subject == 'Clase cancelada' for e in events))
+            self.assertGreater(send.call_count, 0)
+
     def test_legacy_notification_table_gets_lease_column(self):
         from app.database import ensure_notification_lease_column
         legacy_engine = create_engine("sqlite:///:memory:")
@@ -87,6 +104,32 @@ class NotificationSettingsTest(unittest.TestCase):
             enqueue_booking_request(db, booking)
             recipients = {event.recipient for event in db.scalars(select(models.NotificationEvent))}
         self.assertEqual(recipients, {"clases@beciencia.es", "student@example.com"})
+
+    def test_booking_notifications_label_madrid_time_across_dst(self):
+        from app.notifications import enqueue_booking_request, enqueue_booking_decision, enqueue_booking_change, enqueue_due_reminders
+        start = datetime(2026, 10, 25, 0, 30, tzinfo=timezone.utc)
+        end = datetime(2026, 10, 25, 1, 30, tzinfo=timezone.utc)
+        with self.sessions() as db:
+            booking = models.Booking(guest_name="Guest", guest_email="guest@example.com", starts_at=start,
+                                     ends_at=end, status="confirmed", note="Prueba")
+            db.add(booking); db.flush()
+            enqueue_booking_request(db, booking)
+            enqueue_booking_decision(db, booking)
+            enqueue_booking_change(db, booking, "Clase reprogramada", start - timedelta(days=1))
+            db.commit()
+        with patch("app.notifications.datetime") as clock:
+            clock.now.return_value = start - timedelta(minutes=30)
+            self.assertEqual(enqueue_due_reminders(self.sessions), 1)
+        with self.sessions() as db:
+            events = list(db.scalars(select(models.NotificationEvent)))
+            self.assertEqual(len(events), 6)
+            for event in events:
+                self.assertIn("25/10/2026 02:30 UTC+02:00 (hora peninsular española; Europe/Madrid)", event.body)
+                self.assertIn("25/10/2026 02:30 UTC+01:00 (hora peninsular española; Europe/Madrid)", event.body)
+            changes = [event for event in events if event.subject == "Clase reprogramada"]
+            self.assertEqual(len(changes), 2)
+            for event in changes:
+                self.assertIn("24/10/2026 02:30 UTC+02:00 (hora peninsular española; Europe/Madrid)", event.body)
 
     def test_booking_request_is_durable_and_deduplicated(self):
         start = datetime.now(timezone.utc).replace(second=0, microsecond=0) + timedelta(days=3)
@@ -199,6 +242,78 @@ class NotificationSettingsTest(unittest.TestCase):
             self.assertEqual(reminder.status, "cancelled")
             db.rollback()
 
+    def test_cancellation_invalidates_only_unsent_related_booking_events(self):
+        from app.notifications import enqueue_booking_change
+        start = datetime.now(timezone.utc) + timedelta(days=3)
+        with self.sessions() as db:
+            booking = models.Booking(user_id=self.student_id, starts_at=start, ends_at=start + timedelta(hours=1), status="cancelled")
+            db.add(booking); db.flush()
+            prefix = f"booking:{booking.id}:"
+            for key, status in [("requested:student", "pending"), ("confirmed:student", "processing"),
+                                ("reminder:old", "pending"), ("Clase reprogramada:old:student", "pending"),
+                                ("declined:student", "sent"), ("requested:admin:x", "simulated")]:
+                db.add(models.NotificationEvent(logical_key=prefix + key, recipient="x@example.com", subject="x", body="x", status=status))
+            db.add(models.NotificationEvent(logical_key="contact:1:admin:x", recipient="x@example.com", subject="x", body="x"))
+            db.flush()
+            enqueue_booking_change(db, booking, "Clase cancelada")
+            db.commit()
+            statuses = {e.logical_key: e.status for e in db.scalars(select(models.NotificationEvent))}
+            for suffix in ("requested:student", "confirmed:student", "reminder:old", "Clase reprogramada:old:student"):
+                self.assertEqual(statuses[prefix + suffix], "cancelled")
+            self.assertEqual(statuses[prefix + "declined:student"], "sent")
+            self.assertEqual(statuses[prefix + "requested:admin:x"], "simulated")
+            self.assertEqual(statuses["contact:1:admin:x"], "pending")
+            self.assertEqual(sum(v == "pending" for k, v in statuses.items() if k.startswith(prefix + "Clase cancelada:")), 2)
+
+    def test_delivery_cancels_reminders_at_or_after_class_start(self):
+        from app.notifications import deliver_pending
+        now = datetime.now(timezone.utc) + timedelta(minutes=2)
+        with self.sessions() as db:
+            for offset in (-1, 0, 1):
+                start = now + timedelta(seconds=offset)
+                booking = models.Booking(user_id=self.student_id, starts_at=start, ends_at=start + timedelta(hours=1), status="confirmed")
+                db.add(booking); db.flush()
+                db.add(models.NotificationEvent(logical_key=f"booking:{booking.id}:reminder:{start.isoformat()}",
+                    recipient="x@example.com", subject=str(offset), body="x", available_at=now - timedelta(minutes=1)))
+            db.commit()
+        with patch("app.notifications.datetime", wraps=datetime) as clock, patch("app.notifications._send", return_value=True) as send:
+            clock.now.return_value = now
+            self.assertEqual(deliver_pending(self.sessions), 1)
+            send.assert_called_once()
+        with self.sessions() as db:
+            statuses = {e.subject: e.status for e in db.scalars(select(models.NotificationEvent))}
+            self.assertEqual(statuses, {"-1": "cancelled", "0": "cancelled", "1": "sent"})
+
+    def test_delivery_skips_legacy_confirmation_for_cancelled_booking(self):
+        from app.notifications import deliver_pending
+        start = datetime.now(timezone.utc) + timedelta(days=3)
+        with self.sessions() as db:
+            booking = models.Booking(user_id=self.student_id, starts_at=start, ends_at=start + timedelta(hours=1), status="cancelled")
+            db.add(booking); db.flush()
+            db.add(models.NotificationEvent(logical_key=f"booking:{booking.id}:confirmed:student", recipient="x@example.com", subject="x", body="x"))
+            db.commit()
+        with patch("app.notifications._send") as send:
+            deliver_pending(self.sessions)
+            send.assert_not_called()
+        with self.sessions() as db:
+            self.assertEqual(db.scalar(select(models.NotificationEvent)).status, "cancelled")
+
+    def test_cancel_during_send_does_not_resurrect_event_after_failure(self):
+        from app.notifications import deliver_pending
+        with self.sessions() as db:
+            event = models.NotificationEvent(logical_key="unrelated:race", recipient="x@example.com", subject="x", body="x")
+            db.add(event); db.commit(); event_id = event.id
+        def cancel_then_fail(_):
+            with self.sessions() as other:
+                saved = other.get(models.NotificationEvent, event_id)
+                saved.status, saved.lease_expires_at = "cancelled", None
+                other.commit()
+            raise RuntimeError("simulated failure")
+        with patch("app.notifications._send", side_effect=cancel_then_fail):
+            deliver_pending(self.sessions)
+        with self.sessions() as db:
+            self.assertEqual(db.get(models.NotificationEvent, event_id).status, "cancelled")
+
     def test_outbox_enqueue_rolls_back_with_request_transaction(self):
         from app.notifications import enqueue_contact_request
         with self.sessions() as db:
@@ -209,6 +324,81 @@ class NotificationSettingsTest(unittest.TestCase):
         with self.sessions() as db:
             self.assertEqual(list(db.scalars(select(models.ContactRequest))), [])
             self.assertEqual(list(db.scalars(select(models.NotificationEvent))), [])
+
+    def test_requested_edit_replaces_stale_requests(self):
+        from app.notifications import enqueue_booking_request
+        start = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0) + timedelta(days=3)
+        with self.sessions() as db:
+            booking = models.Booking(user_id=self.student_id, starts_at=start, ends_at=start + timedelta(hours=1), status="requested", note="Química")
+            db.add(booking); db.flush(); enqueue_booking_request(db, booking); db.commit(); booking_id = booking.id
+        response = self.client.patch(f"/admin/classes/{booking_id}", headers=self.headers(self.admin_id), json={"starts_at": (start + timedelta(hours=2)).isoformat(), "duration_slots": 1, "subject": "Física ESO", "admin_comment": ""})
+        self.assertEqual(response.status_code, 200, response.text)
+        with self.sessions() as db:
+            events = list(db.scalars(select(models.NotificationEvent)))
+            active = [e for e in events if e.status == "pending"]
+            self.assertEqual(len(active), 2)
+            self.assertTrue(all("Física" in e.body for e in active))
+            self.assertEqual(sum(e.status == "cancelled" for e in events), 2)
+
+    def test_repeated_edits_and_reminders_have_distinct_generations(self):
+        from app.notifications import enqueue_booking_change, enqueue_due_reminders
+        start = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0) + timedelta(hours=2)
+        with self.sessions() as db:
+            booking = models.Booking(user_id=self.student_id, starts_at=start, ends_at=start + timedelta(hours=1), status="confirmed", note="Química")
+            db.add(booking); db.commit(); booking_id = booking.id
+        enqueue_due_reminders(self.sessions)
+        for offset, duration, subject in [(1, 1, "Física"), (0, 2, "Química"), (0, 1, "Física")]:
+            with self.sessions() as db:
+                booking = db.get(models.Booking, booking_id); previous = booking.starts_at
+                booking.starts_at = start + timedelta(hours=offset); booking.ends_at = booking.starts_at + timedelta(hours=duration); booking.note = subject
+                enqueue_booking_change(db, booking, "Clase reprogramada", previous); db.commit()
+            enqueue_due_reminders(self.sessions)
+        with self.sessions() as db:
+            events = list(db.scalars(select(models.NotificationEvent)))
+            changes = [e for e in events if e.subject == "Clase reprogramada"]
+            reminders = [e for e in events if e.subject == "Recordatorio de tu clase"]
+            self.assertEqual(len(changes), 6)
+            self.assertEqual(len(reminders), 4)
+            self.assertEqual(sum(e.status == "pending" for e in changes), 2)
+            self.assertEqual(sum(e.status == "pending" for e in reminders), 1)
+            self.assertIn("Física", [e for e in reminders if e.status == "pending"][0].body)
+
+    def test_success_after_cancellation_preserves_cancellation_and_records_send(self):
+        from app.notifications import deliver_pending
+        with self.sessions() as db:
+            event = models.NotificationEvent(logical_key="unrelated:race:sent", recipient="x@example.com", subject="x", body="x")
+            db.add(event); db.commit(); event_id = event.id
+        def cancel_then_send(_):
+            with self.sessions() as other:
+                saved = other.get(models.NotificationEvent, event_id)
+                saved.status, saved.lease_expires_at = "cancelled", None
+                other.commit()
+            return True
+        with patch("app.notifications._send", side_effect=cancel_then_send):
+            self.assertEqual(deliver_pending(self.sessions), 1)
+        with self.sessions() as db:
+            saved = db.get(models.NotificationEvent, event_id)
+            self.assertEqual(saved.status, "cancelled")
+            self.assertIsNotNone(saved.sent_at)
+
+    def test_smtp_sends_safe_html_and_plain_text_for_legacy_events(self):
+        from app.notifications import _send
+        body = 'Pendiente de confirmación\n<script>alert("x")</script> & detalles'
+        event = models.NotificationEvent(logical_key="old:1", recipient="student@example.com", subject='<img src=x onerror="alert(1)">', body=body)
+        with patch("app.notifications.settings.smtp_mode", "smtp"), patch("app.notifications.settings.smtp_host", "smtp.example.com"), \
+             patch("app.notifications.settings.smtp_ssl", True), patch("app.notifications.smtplib.SMTP_SSL") as transport:
+            smtp = transport.return_value.__enter__.return_value
+            self.assertTrue(_send(event))
+        message = smtp.send_message.call_args.args[0]
+        self.assertEqual(message.get_content_type(), "multipart/alternative")
+        self.assertEqual(message.get_body(preferencelist=("plain",)).get_content().rstrip("\n"), body)
+        html = message.get_body(preferencelist=("html",)).get_content()
+        self.assertIn("&lt;script&gt;", html)
+        self.assertIn("&lt;img", html)
+        self.assertNotIn("<script>", html)
+        self.assertNotIn('<img src=x', html)
+        self.assertNotIn('http://', html)
+        self.assertNotIn('https://', html)
 
     def test_smtp_ssl_uses_ssl_transport_without_starttls(self):
         from app.notifications import _send
