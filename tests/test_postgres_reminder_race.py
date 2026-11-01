@@ -20,7 +20,7 @@ class ReminderRaceTest(unittest.TestCase):
         engine = create_engine(os.environ['ISOLATED_POSTGRES_TEST_URL'])
         Base.metadata.create_all(engine)
         sessions = sessionmaker(bind=engine, autoflush=False)
-        start = (datetime.now(timezone.utc) + timedelta(hours=2)).replace(minute=0, second=0, microsecond=0)
+        start = (datetime.now(timezone.utc) + timedelta(days=1)).replace(hour=12, minute=0, second=0, microsecond=0)
         with sessions() as db:
             booking = models.Booking(guest_name='Race', guest_email='race@example.com', starts_at=start,
                                      ends_at=start + timedelta(minutes=30), status='confirmed', note='Química')
@@ -34,7 +34,9 @@ class ReminderRaceTest(unittest.TestCase):
         event.listen(engine, 'before_cursor_execute', before_sql)
         def schedule():
             try:
-                enqueue_due_reminders(sessions)
+                with patch('app.notifications.datetime', wraps=datetime) as clock:
+                    clock.now.return_value = start - timedelta(hours=2)
+                    enqueue_due_reminders(sessions)
             except Exception as exc:
                 errors.append(exc)
         def edit():
@@ -56,7 +58,9 @@ class ReminderRaceTest(unittest.TestCase):
         scheduler.join(10); editor.join(10)
         self.assertFalse(scheduler.is_alive() or editor.is_alive(), 'threads did not finish')
         self.assertEqual(errors, [])
-        enqueue_due_reminders(sessions)
+        with patch('app.notifications.datetime', wraps=datetime) as clock:
+            clock.now.return_value = start - timedelta(hours=2)
+            enqueue_due_reminders(sessions)
         with sessions() as db:
             reminders = list(db.scalars(select(models.NotificationEvent).where(
                 models.NotificationEvent.subject == 'Recordatorio de tu clase', models.NotificationEvent.status == 'pending')))

@@ -1,0 +1,38 @@
+# Proyecto independiente: nunca se conecta a la base de datos ni al worker.
+name: beciencia-mail-preview
+services:
+  mailpit:
+    image: axllent/mailpit:v1.28.2
+    networks: [preview]
+    # Sin relay SMTP ni volúmenes: mensajes efímeros en memoria.
+  ui:
+    image: nginx:1.27-alpine
+    ports:
+      - "127.0.0.1:8025:8025"
+    volumes:
+      - ./mail-preview-nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    networks: [preview, ui]
+    depends_on: [mailpit]
+  examples:
+    build:
+      context: .
+    image: beciencia-mail-preview:local
+    profiles: [examples]
+    working_dir: /tmp
+    command: ["python", "-m", "app.mail_preview"]
+    environment:
+      PYTHONPATH: /app
+      SMTP_MODE: smtp
+      SMTP_HOST: mailpit
+      SMTP_PORT: "1025"
+      SMTP_SENDER: preview@example.invalid
+      SMTP_USERNAME: ""
+      SMTP_PASSWORD: ""
+      SMTP_SSL: "false"
+      SMTP_STARTTLS: "false"
+    networks: [preview]
+    depends_on: [mailpit]
+networks:
+  preview:
+    internal: true
+  ui: {}

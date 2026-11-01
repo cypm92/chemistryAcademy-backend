@@ -32,8 +32,49 @@ def local_time(value):
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
     local = value.astimezone(MADRID)
-    offset = local.strftime("%z")
-    return f"{local:%d/%m/%Y %H:%M} UTC{offset[:3]}:{offset[3:]} (hora peninsular española; Europe/Madrid)"
+    days = ('lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado', 'domingo')
+    months = ('enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio',
+              'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre')
+    offset = ''
+    if local.replace(fold=0).utcoffset() != local.replace(fold=1).utcoffset():
+        raw = local.strftime('%z')
+        offset = f' UTC{raw[:3]}:{raw[3:]}'
+    return (f'{days[local.weekday()]} {local.day} de {months[local.month - 1]} de {local.year}, '
+            f'a las {local:%H:%M}{offset} (hora de Madrid)')
+
+
+def local_range(start, end):
+    def in_madrid(value):
+        return (value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value).astimezone(MADRID)
+
+    def date_label(value):
+        days = ('lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado', 'domingo')
+        months = ('enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio',
+                  'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre')
+        return f'{days[value.weekday()]} {value.day} de {months[value.month - 1]} de {value.year}'
+
+    def offset(value):
+        raw = value.strftime('%z')
+        return f'UTC{raw[:3]}:{raw[3:]}'
+
+    def ambiguous(value):
+        return value.replace(fold=0).utcoffset() != value.replace(fold=1).utcoffset()
+
+    first, last = in_madrid(start), in_madrid(end)
+    if first.utcoffset() != last.utcoffset() or ambiguous(first) or ambiguous(last):
+        return (f'{date_label(first)} a las {first:%H:%M} ({offset(first)}) hasta '
+                f'{date_label(last)} a las {last:%H:%M} ({offset(last)}) (hora de Madrid)')
+    if first.date() != last.date():
+        return f'{date_label(first)} a las {first:%H:%M} hasta {date_label(last)} a las {last:%H:%M} (hora de Madrid)'
+    return f'{date_label(first)}, de {first:%H:%M} a {last:%H:%M} (hora de Madrid)'
+
+
+def booking_details(booking):
+    return f"Fecha y hora: {local_range(booking.starts_at, booking.ends_at)}\nAsignatura o nota: {booking.note or 'No indicada'}"
+
+
+def student_name(booking):
+    return (booking.user.name if booking.user else booking.guest_name) or "estudiante"
 
 
 def enqueue(db, logical_key, recipient, subject, body):
@@ -44,11 +85,15 @@ def enqueue(db, logical_key, recipient, subject, body):
 def enqueue_booking_request(db, booking, revision=None):
     name = booking.user.name if booking.user else (booking.guest_name or "")
     email = booking.user.email if booking.user else booking.guest_email
-    body = f"Nueva solicitud de {name}: {local_time(booking.starts_at)}–{local_time(booking.ends_at)} ({booking.note})"
+    body = (f"Hola, equipo:\n\nHay una nueva solicitud de clase pendiente de revisión.\n\n"
+            f"Alumno: {name or 'No indicado'}\nCorreo: {email or 'No indicado'}\n{booking_details(booking)}\n\n"
+            "Gracias,\nEquipo BeCiencia")
     suffix = f":{revision}" if revision else ""
     for address in DEFAULT_RECIPIENTS:
         enqueue(db, f"booking:{booking.id}:requested:admin:{address}{suffix}", address, "Nueva solicitud de clase", body)
-    student_body = f"Tu solicitud está pendiente de confirmación. {body}"
+    student_body = (f"Hola, {name or 'estudiante'}:\n\nGracias por solicitar una clase. "
+                    f"Tu solicitud está pendiente de confirmación. Te avisaremos cuando la revisemos.\n\n"
+                    f"{booking_details(booking)}\n\nUn saludo,\nEquipo BeCiencia")
     enqueue(db, f"booking:{booking.id}:requested:student{suffix}", email, "Solicitud de clase recibida", student_body)
 
 
@@ -69,24 +114,37 @@ def enqueue_booking_decision(db, booking):
     _invalidate_booking_events(db, booking.id, ("requested",))
     email = booking.user.email if booking.user else booking.guest_email
     subject = "Clase confirmada" if booking.status == "confirmed" else "Solicitud de clase rechazada"
-    body = f"{subject}: {local_time(booking.starts_at)}–{local_time(booking.ends_at)} ({booking.note})"
+    message = ("Tu clase está confirmada. ¡Nos vemos pronto!" if booking.status == "confirmed"
+               else "Sentimos comunicarte que no hemos podido aceptar tu solicitud de clase.")
+    body = (f"Hola, {student_name(booking)}:\n\n{message}\n\n{booking_details(booking)}"
+            "\n\nSi tienes alguna pregunta, contacta con nosotros.\n\nUn saludo,\nEquipo BeCiencia")
     enqueue(db, f"booking:{booking.id}:{booking.status}:student", email, subject, body)
 
 
-def enqueue_booking_change(db, booking, action, previous_start=None):
+def enqueue_booking_change(db, booking, action, previous_start=None, was_pending=False):
     _invalidate_booking_events(db, booking.id,
         ("requested", "confirmed", "declined", "reminder", "Clase reprogramada"))
     email = booking.user.email if booking.user else booking.guest_email
-    body = f"{action}: {local_time(booking.starts_at)}–{local_time(booking.ends_at)} ({booking.note})"
+    pending_cancellation = action == "Clase cancelada" and was_pending
+    subject = "Solicitud de clase cancelada" if pending_cancellation else action
+    message = ("Tu clase se ha reprogramado. Este es el nuevo horario:"
+               if action == "Clase reprogramada" else
+               "Tu solicitud pendiente de confirmación ha sido cancelada. Estos son sus datos:"
+               if pending_cancellation else "Tu clase ha sido cancelada. Estos son los datos de la reserva:")
+    details = booking_details(booking)
     if previous_start:
-        body += f"; horario anterior: {local_time(previous_start)}"
+        details += f"\nHorario anterior: {local_time(previous_start)}"
+    body = (f"Hola, {student_name(booking)}:\n\n{message}\n\n{details}"
+            "\n\nSi tienes alguna pregunta, contacta con nosotros.\n\nUn saludo,\nEquipo BeCiencia")
+    admin_body = (f"Hola, equipo:\n\n{subject}.\nAlumno: {student_name(booking)}\n"
+                  f"Correo: {email or 'No indicado'}\n{details}\n\nEquipo BeCiencia")
     start = booking.starts_at
     if start.tzinfo is None:
         start = start.replace(tzinfo=timezone.utc)
     key = f"booking:{booking.id}:{action}:{start.astimezone(timezone.utc).isoformat()}~{uuid4().hex}"
-    enqueue(db, key + ":student", email, action, body)
+    enqueue(db, key + ":student", email, subject, body)
     for address in DEFAULT_RECIPIENTS:
-        enqueue(db, key + ":admin:" + address, address, action, body)
+        enqueue(db, key + ":admin:" + address, address, subject, admin_body)
 
 
 def _send(event):
@@ -99,14 +157,21 @@ def _send(event):
     # Render the persisted text at delivery time, including legacy outbox rows.
     # Dynamic values are text only: never interpolate them into attributes or URLs.
     title = escape(event.subject)
-    body = escape(event.body).replace("\n", "<br>\n")
+    paragraphs = []
+    for block in event.body.split("\n\n"):
+        content = escape(block).replace("\n", "<br>\n")
+        if block.startswith("Fecha y hora:"):
+            paragraphs.append(f'<p class="booking-details" style="margin:0 0 20px;padding:16px;background-color:#f0f6f3;border-left:3px solid #397b69;border-radius:6px;">{content}</p>')
+        else:
+            paragraphs.append(f'<p style="margin:0 0 18px;">{content}</p>')
+    body = "\n".join(paragraphs)
     message.add_alternative(f'''<!doctype html>
 <html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"></head>
 <body style="margin:0;padding:0;background-color:#f3f6f8;font-family:Arial,Helvetica,sans-serif;color:#233242;">
 <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background-color:#f3f6f8;"><tr><td align="center" style="padding:24px 12px;">
 <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:600px;background-color:#ffffff;">
 <tr><td style="background-color:#153d49;padding:24px 28px;color:#ffffff;font-size:22px;font-weight:bold;">BeCiencia</td></tr>
-<tr><td style="padding:28px;line-height:1.6;font-size:16px;"><h1 style="font-size:22px;line-height:1.3;margin:0 0 20px;color:#153d49;">{title}</h1><p style="margin:0;">{body}</p></td></tr>
+<tr><td style="padding:28px;line-height:1.6;font-size:16px;"><h1 style="font-size:22px;line-height:1.3;margin:0 0 20px;color:#153d49;">{title}</h1>{body}</td></tr>
 <tr><td style="padding:20px 28px;border-top:1px solid #e3e9eb;color:#64747a;font-size:13px;">BeCiencia · Notificación de la academia</td></tr>
 </table></td></tr></table></body></html>''', subtype="html")
     transport = smtplib.SMTP_SSL if settings.smtp_ssl else smtplib.SMTP
@@ -223,7 +288,8 @@ def enqueue_due_reminders(session_factory):
             .order_by(models.Booking.id).with_for_update()))
         for booking in bookings:
             email = booking.user.email if booking.user else booking.guest_email
-            body = f"Recordatorio de clase: {local_time(booking.starts_at)}–{local_time(booking.ends_at)} ({booking.note})"
+            body = (f"Hola, {student_name(booking)}:\n\nTe recordamos que tienes una clase confirmada.\n\n"
+                    f"{booking_details(booking)}\n\n¡Hasta pronto!\nEquipo BeCiencia")
             latest_change = db.scalar(select(models.NotificationEvent.logical_key).where(
                 models.NotificationEvent.logical_key.like(f"booking:{booking.id}:Clase reprogramada:%")
             ).order_by(models.NotificationEvent.id.desc()).limit(1))
@@ -235,7 +301,9 @@ def enqueue_due_reminders(session_factory):
 
 
 def enqueue_contact_request(db, request):
-    body = f"Nueva solicitud de contacto: {request.name}; {request.contact}; {request.need}; {request.message}"
+    body = (f"Hola, equipo:\n\nHay una nueva solicitud de contacto pendiente de atención.\n\n"
+            f"Nombre: {request.name}\nDatos de contacto: {request.contact}\n"
+            f"Necesidad: {request.need}\nMensaje: {request.message or 'No indicado'}\n\nEquipo BeCiencia")
     for address in DEFAULT_RECIPIENTS:
         enqueue(db, f"contact:{request.id}:admin:{address}", address, "Nueva solicitud de contacto", body)
 
