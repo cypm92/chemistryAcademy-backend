@@ -82,6 +82,13 @@ def enqueue(db, logical_key, recipient, subject, body):
         db.add(models.NotificationEvent(logical_key=logical_key, recipient=recipient, subject=subject, body=body))
 
 
+def enqueue_registration(db, user):
+    body = (f"Hola, equipo:\n\nUna nueva persona se ha registrado en BeCiencia.\n\n"
+            f"Nombre: {user.name}\nCorreo: {user.email}\n\nEquipo BeCiencia")
+    for address in DEFAULT_RECIPIENTS:
+        enqueue(db, f"registration:{user.id}:admin:{address}", address, "Nuevo alumno registrado", body)
+
+
 def enqueue_booking_request(db, booking, revision=None):
     name = booking.user.name if booking.user else (booking.guest_name or "")
     email = booking.user.email if booking.user else booking.guest_email

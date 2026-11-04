@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 from . import models, schemas
 from .config import settings
 from .database import Base, SessionLocal, engine, ensure_notification_lease_column, ensure_public_resource_columns, get_db
-from .notifications import (enqueue_booking_change, enqueue_booking_decision, enqueue_booking_request, enqueue_contact_request, refresh_booking_request,
+from .notifications import (enqueue_booking_change, enqueue_booking_decision, enqueue_booking_request, enqueue_contact_request, enqueue_registration, refresh_booking_request,
                             notify_admin_of_booking_request, notify_admin_of_contact_request,
                             notify_student_of_booking_decision, notification_settings)
 from .security import admin_user, create_token, current_user, hash_password, verify_password
@@ -390,7 +390,9 @@ def register(data: schemas.UserCreate, db: Session = Depends(get_db)):
     if db.scalar(select(models.User).where(models.User.email == email)):
         raise HTTPException(400, "El email ya está registrado")
     user = models.User(name=data.name, email=email, password_hash=hash_password(data.password), role="guest")
-    db.add(user); db.commit(); db.refresh(user)
+    db.add(user); db.flush()
+    enqueue_registration(db, user)
+    db.commit(); db.refresh(user)
     return user
 
 

@@ -44,6 +44,11 @@ def examples():
                 capture()
             notifications.enqueue_booking_change(db, booking, 'Clase cancelada', was_pending=True)
             capture()
+            registration = models.User(name='Lucía Ejemplo', email='alumna@example.invalid', password_hash='no-real-password', role='guest')
+            db.add(registration)
+            db.flush()
+            notifications.enqueue_registration(db, registration)
+            capture()
             contact = models.ContactRequest(id=1, name='Lucía Ejemplo', contact='alumna@example.invalid',
                                             need='Química', message='Mensaje de ejemplo')
             notifications.enqueue_contact_request(db, contact)
