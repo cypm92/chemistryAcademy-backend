@@ -14,7 +14,7 @@ class MailPreviewTests(unittest.TestCase):
             'Clase reprogramada', 'Clase reprogramada',
             'Clase cancelada', 'Clase cancelada',
             'Solicitud de clase cancelada', 'Solicitud de clase cancelada',
-            'Nueva solicitud de contacto', 'Recordatorio de tu clase',
+            'Nueva solicitud de contacto', 'Recordatorio de tu clase', 'Nuevo alumno registrado',
         ])
         self.assertTrue(all(event.recipient.endswith('@example.invalid') for event in events))
 
@@ -23,7 +23,7 @@ class MailPreviewTests(unittest.TestCase):
         for event in events:
             if event.subject in ('Clase cancelada', 'Clase reprogramada'):
                 self.assertEqual('Horario anterior:' in event.body, event.subject == 'Clase reprogramada')
-            if event.subject != 'Nueva solicitud de contacto':
+            if event.subject not in ('Nueva solicitud de contacto', 'Nuevo alumno registrado'):
                 self.assertIn('lunes 2 de noviembre de 2026', event.body)
                 self.assertIn('de 14:00 a 15:00 (hora de Madrid)', event.body)
 
