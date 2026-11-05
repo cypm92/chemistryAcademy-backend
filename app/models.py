@@ -178,6 +178,7 @@ class Booking(Base):
     starts_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     ends_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     status: Mapped[str] = mapped_column(String(20), default="requested", index=True)
+    management_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
     is_historical: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     note: Mapped[str] = mapped_column(String(300), default="")
     admin_comment: Mapped[str] = mapped_column(Text, default="")

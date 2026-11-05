@@ -14,8 +14,8 @@ from sqlalchemy.orm import Session
 
 from . import models, schemas
 from .config import settings
-from .database import Base, SessionLocal, engine, ensure_notification_lease_column, ensure_public_resource_columns, get_db
-from .notifications import (enqueue_booking_change, enqueue_booking_decision, enqueue_booking_request, enqueue_contact_request, enqueue_registration, refresh_booking_request,
+from .database import Base, SessionLocal, engine, ensure_booking_management_column, ensure_notification_lease_column, ensure_public_resource_columns, get_db
+from .notifications import (_invalidate_booking_events, enqueue_booking_change, enqueue_booking_decision, enqueue_booking_request, enqueue_contact_request, enqueue_registration, refresh_booking_request,
                             notify_admin_of_booking_request, notify_admin_of_contact_request,
                             notify_student_of_booking_decision, notification_settings)
 from .security import admin_user, create_token, current_user, hash_password, verify_password
@@ -137,6 +137,7 @@ def home_content(db: Session) -> dict:
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     Base.metadata.create_all(engine)
+    ensure_booking_management_column()
     ensure_notification_lease_column()
     ensure_public_resource_columns()
     ensure_user_avatar_columns()
@@ -478,6 +479,7 @@ def booking_data(booking: models.Booking, viewer: models.User, include_user: boo
         "ends_at": booking.ends_at,
         "status": booking.status,
         "is_historical": booking.is_historical,
+        "management_status": booking.management_status if viewer.role == "admin" else None,
         "note": booking.note if (is_mine or viewer.role == "admin") else "",
         "admin_comment": booking.admin_comment if (is_mine or viewer.role == "admin") else "",
         "user_id": booking.user_id if viewer.role == "admin" else None,
@@ -711,6 +713,8 @@ def update_admin_class(booking_id: int, data: schemas.AdminClassUpdate, _: model
     if data.subject not in BOOKING_SUBJECTS:
         raise HTTPException(400, "Selecciona una asignatura válida")
     ends_at = starts_at + timedelta(minutes=30 * data.duration_slots)
+    if booking.management_status is not None and (aware(booking.starts_at) != starts_at or aware(booking.ends_at) != ends_at):
+        raise HTTPException(400, "No se puede modificar el horario de una clase gestionada")
     ensure_class_hours(starts_at, ends_at)
     if booking_conflicts(starts_at, ends_at, db, booking.id):
         raise HTTPException(409, "Ese horario no está disponible")
@@ -734,8 +738,13 @@ def cancel_admin_class(booking_id: int, _: models.User = Depends(admin_user), db
     if booking.status not in {"requested", "confirmed"}:
         raise HTTPException(400, "Esta reserva no se puede cancelar")
     was_pending = booking.status == "requested"
+    finished = not was_pending and aware(booking.ends_at) <= datetime.now(timezone.utc)
     booking.status = "cancelled"
-    enqueue_booking_change(db, booking, "Clase cancelada", was_pending=was_pending)
+    booking.management_status = None
+    if finished:
+        _invalidate_booking_events(db, booking.id, ("requested", "confirmed", "declined", "reminder", "Clase reprogramada"))
+    else:
+        enqueue_booking_change(db, booking, "Clase cancelada", was_pending=was_pending)
     db.commit(); db.refresh(booking)
     return class_data(booking)
 
@@ -749,6 +758,7 @@ def class_data(booking: models.Booking) -> dict:
         "ends_at": booking.ends_at,
         "status": booking.status,
         "is_historical": booking.is_historical,
+        "management_status": booking.management_status,
         "topic": booking.note or "Clase particular",
         "admin_comment": booking.admin_comment,
         "user_id": booking.user_id,
@@ -775,7 +785,20 @@ def classes(_: models.User = Depends(admin_user), db: Session = Depends(get_db))
 def my_classes(user: models.User = Depends(current_user), db: Session = Depends(get_db)):
     rows = list(db.scalars(select(models.Booking).where(models.Booking.user_id == user.id, models.Booking.is_historical.is_(False))
                            .order_by(models.Booking.starts_at.desc())))
-    return [class_data(booking) for booking in rows]
+    return [{**class_data(booking), "management_status": None} for booking in rows]
+
+
+@app.patch("/admin/classes/{booking_id}/management", response_model=schemas.ClassOut)
+def set_class_management(booking_id: int, data: schemas.ClassManagementUpdate,
+                         _: models.User = Depends(admin_user), db: Session = Depends(get_db)):
+    booking = db.scalar(select(models.Booking).where(models.Booking.id == booking_id).with_for_update())
+    if not booking or booking.status in {"blocked", "unavailable"} or not (booking.user_id is not None or booking.guest_name or booking.guest_email):
+        raise HTTPException(404, "Clase no encontrada")
+    if booking.status != "confirmed" or aware(booking.ends_at) > datetime.now(timezone.utc):
+        raise HTTPException(400, "Solo se pueden gestionar clases confirmadas y terminadas")
+    booking.management_status = data.management_status
+    db.commit(); db.refresh(booking)
+    return class_data(booking)
 
 
 @app.patch("/admin/classes/{booking_id}/historical", response_model=schemas.ClassOut)
