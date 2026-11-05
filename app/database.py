@@ -13,6 +13,21 @@ engine = create_engine(settings.database_url, connect_args=connect_args)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
 
+def ensure_booking_management_column(bind=engine) -> None:
+    """Add a nullable management state without changing legacy bookings."""
+    inspector = inspect(bind)
+    if not inspector.has_table("bookings"):
+        return
+    if "management_status" in {column["name"] for column in inspector.get_columns("bookings")}:
+        return
+    if bind.dialect.name == "postgresql":
+        with bind.begin() as connection:
+            connection.execute(text("ALTER TABLE bookings ADD COLUMN IF NOT EXISTS management_status VARCHAR(20)"))
+    else:
+        with bind.begin() as connection:
+            connection.execute(text("ALTER TABLE bookings ADD COLUMN management_status VARCHAR(20)"))
+
+
 def ensure_notification_lease_column() -> None:
     """Add the lease column to an existing notification outbox table."""
     table = "notification_events"

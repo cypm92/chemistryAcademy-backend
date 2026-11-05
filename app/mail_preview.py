@@ -6,7 +6,7 @@ from unittest.mock import patch
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
-from . import models, notifications
+from . import admin_reports, models, notifications
 
 
 def examples():
@@ -61,6 +61,21 @@ def examples():
             notifications.enqueue_due_reminders(factory)
         with factory() as db:
             for event in db.scalars(select(models.NotificationEvent)).all():
+                result.append(SimpleNamespace(recipient=event.recipient, subject=event.subject, body=event.body))
+            # Datos exclusivos de los informes: mes anterior y arrastre sin gestionar.
+            for name, email, date, status in (
+                ('Lucía Ejemplo', 'alumna@example.invalid', datetime(2026, 10, 12, 13, tzinfo=timezone.utc), 'paid'),
+                ('Mateo Ejemplo', 'alumno@example.invalid', datetime(2026, 10, 19, 13, tzinfo=timezone.utc), 'pending_payment'),
+                ('Lucía Ejemplo', 'alumna@example.invalid', datetime(2026, 9, 21, 13, tzinfo=timezone.utc), None),
+            ):
+                db.add(models.Booking(guest_name=name, guest_email=email, starts_at=date,
+                                      ends_at=date + timedelta(hours=1), status='confirmed',
+                                      management_status=status))
+            db.commit()
+        admin_reports.enqueue_due_reports(factory, datetime(2026, 11, 1, 10, tzinfo=timezone.utc))
+        with factory() as db:
+            for event in db.scalars(select(models.NotificationEvent).where(
+                    models.NotificationEvent.logical_key.like('report:%'))).all():
                 result.append(SimpleNamespace(recipient=event.recipient, subject=event.subject, body=event.body))
     finally:
         notifications.DEFAULT_RECIPIENTS = saved_recipients

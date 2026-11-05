@@ -15,6 +15,7 @@ class MailPreviewTests(unittest.TestCase):
             'Clase cancelada', 'Clase cancelada',
             'Solicitud de clase cancelada', 'Solicitud de clase cancelada',
             'Nueva solicitud de contacto', 'Recordatorio de tu clase', 'Nuevo alumno registrado',
+            'Clases pendientes de gestión', 'Informe mensual 2026-10',
         ])
         self.assertTrue(all(event.recipient.endswith('@example.invalid') for event in events))
 
@@ -23,9 +24,21 @@ class MailPreviewTests(unittest.TestCase):
         for event in events:
             if event.subject in ('Clase cancelada', 'Clase reprogramada'):
                 self.assertEqual('Horario anterior:' in event.body, event.subject == 'Clase reprogramada')
-            if event.subject not in ('Nueva solicitud de contacto', 'Nuevo alumno registrado'):
+            if event.subject not in ('Nueva solicitud de contacto', 'Nuevo alumno registrado',
+                                     'Clases pendientes de gestión', 'Informe mensual 2026-10'):
                 self.assertIn('lunes 2 de noviembre de 2026', event.body)
                 self.assertIn('de 14:00 a 15:00 (hora de Madrid)', event.body)
+
+    def test_reports_use_real_fictional_booking_data(self):
+        events = {event.subject: event for event in mail_preview.examples()}
+        daily = events['Clases pendientes de gestión']
+        monthly = events['Informe mensual 2026-10']
+        self.assertEqual(daily.recipient, 'administracion@example.invalid')
+        self.assertEqual(monthly.recipient, daily.recipient)
+        self.assertIn('sin gestionar', daily.body)
+        for text in ('Lucía Ejemplo', 'Mateo Ejemplo', 'Pagada', 'Pendiente de pago',
+                     'Sin gestionar', 'Arrastre anterior'):
+            self.assertIn(text, monthly.body)
 
     def test_delivery_requires_fixed_isolated_smtp_settings(self):
         with patch.object(mail_preview.notifications.settings, 'smtp_host', 'external.example'):
