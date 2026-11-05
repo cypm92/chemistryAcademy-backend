@@ -1,3 +1,4 @@
+from typing import Literal
 from datetime import datetime
 
 from typing import Any
@@ -241,6 +242,10 @@ class BookingStatusUpdate(BaseModel):
     status: str
 
 
+class ClassManagementUpdate(BaseModel):
+    management_status: Literal["paid", "pending_payment"] | None
+
+
 class ClassHistoricalUpdate(BaseModel):
     is_historical: bool
 
@@ -266,6 +271,7 @@ class BookingMaterialCreate(BaseModel):
 
 
 class ClassOut(BaseModel):
+    management_status: Literal["paid", "pending_payment"] | None = None
     id: int
     starts_at: datetime
     ends_at: datetime
