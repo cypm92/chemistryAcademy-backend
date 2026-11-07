@@ -1,7 +1,12 @@
 .venv/
 .env
 .env.local
+.env.microsoft-real.local
 academy.db
 storage/
 __pycache__/
 *.pyc
+
+# Environment files; example templates are safe to track.
+.env*
+!.env*.example

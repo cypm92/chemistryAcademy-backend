@@ -167,7 +167,7 @@ class ReportsTest(unittest.TestCase):
         from unittest.mock import patch
         from app import notification_worker as worker
         calls = []
-        with patch.object(worker.Base.metadata, 'create_all', side_effect=lambda *_: calls.append('create')), \
+        with patch.object(worker, 'ensure_application_schema', side_effect=lambda *_: calls.append('create')), \
              patch.object(worker, 'ensure_notification_lease_column', side_effect=lambda: calls.append('lease')), \
              patch.object(worker, 'ensure_booking_management_column', side_effect=lambda: calls.append('management')), \
              patch.object(worker, 'enqueue_due_reports', side_effect=lambda *_: calls.append('reports')), \
@@ -226,7 +226,7 @@ class ReportsTest(unittest.TestCase):
     def test_worker_report_failure_does_not_block_reminders_or_delivery(self):
         from unittest.mock import patch
         from app import notification_worker as worker
-        with patch.object(worker.Base.metadata, 'create_all'), patch.object(worker, 'ensure_notification_lease_column'), \
+        with patch.object(worker, 'ensure_application_schema'), patch.object(worker, 'ensure_notification_lease_column'), \
              patch.object(worker, 'ensure_booking_management_column'), \
              patch.object(worker, 'enqueue_due_reports', side_effect=RuntimeError('sensitive@example.com')), \
              patch.object(worker, 'enqueue_due_reminders', return_value=2), \

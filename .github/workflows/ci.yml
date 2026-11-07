@@ -21,20 +21,84 @@ jobs:
   validate:
     name: CI backend
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Instalar dependencias
-        run: python -m pip install --requirement requirements.txt
-      - name: Verificar dependencias
-        run: python -m pip check
-      - name: Comprobar sintaxis Python
-        run: python -m compileall -q app
-      - name: Comprobar que reiniciar conserva la contraseña de administración
-        run: python -m unittest discover -s tests -v
+      - name: Instalar dependencias de pruebas
+        run: python -m pip install --requirement requirements-test.txt
+      - name: Verificar dependencias y sintaxis
+        run: |
+          python -m pip check
+          python -m compileall -q app
+      # Esta prueba necesita git y Docker del runner, no del contenedor aislado.
+      - name: Comprobar exclusión de archivos de entorno
+        run: python -m pytest tests/test_env_ignore.py -v --junitxml="${RUNNER_TEMP}/backend-host.xml"
+      - name: Ejecutar pruebas con PostgreSQL en red Docker interna
+        run: |
+          set -eu
+          prefix="backend-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          network="${prefix}-network"
+          db="${prefix}-postgres"
+          test_container="${prefix}-tests"
+          image="${prefix}-image"
+          cleanup() {
+            docker rm -f "$test_container" "$db" >/dev/null 2>&1 || true
+            docker network rm "$network" >/dev/null 2>&1 || true
+            docker image rm "$image" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          # Instalar antes de conectar a la red interna; no incluir dependencias en producción.
+          docker build -t "$image" -f - . <<'DOCKERFILE'
+          FROM python:3.12-slim@sha256:2f17fc044b579bab302c2e8054d3a686e2cb9a83de48e70534b94cd8ebbe06a9
+          WORKDIR /app
+          COPY requirements.txt requirements-test.txt ./
+          RUN pip install --no-cache-dir -r requirements-test.txt
+          COPY . .
+          DOCKERFILE
+          docker network create --internal "$network"
+          docker run -d --name "$db" --network "$network" --network-alias postgres             -e POSTGRES_USER=ci_test -e POSTGRES_PASSWORD=ci_test_password             -e POSTGRES_DB=postgres postgres:16-alpine
+          ready=false
+          for i in $(seq 1 60); do
+            if docker exec "$db" pg_isready -U ci_test -d postgres; then ready=true; break; fi
+            sleep 1
+          done
+          test "$ready" = true
+          docker exec -i "$db" psql -U ci_test -d postgres -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE DATABASE booking_disposable;
+          CREATE DATABASE reports_disposable;
+          CREATE DATABASE oauth_disposable;
+          CREATE DATABASE schema_disposable;
+          CREATE DATABASE teams_disposable;
+          CREATE DATABASE teams_delete_disposable;
+          CREATE DATABASE microsoft_e2e_disposable;
+          CREATE DATABASE integration_disposable;
+          SQL
+          docker create --name "$test_container" --network "$network"             -e SMTP_MODE=log -e MICROSOFT_SYNC_ENABLED=false             -e ISOLATED_POSTGRES_TEST_URL=postgresql://ci_test:ci_test_password@postgres:5432/booking_disposable             -e TEST_REPORT_DATABASE_URL=postgresql://ci_test:ci_test_password@postgres:5432/reports_disposable             -e OAUTH_ISOLATED_POSTGRES_TEST_URL=postgresql://ci_test:ci_test_password@postgres:5432/oauth_disposable             -e MICROSOFT_SCHEMA_TEST_POSTGRES_URL=postgresql://ci_test:ci_test_password@postgres:5432/schema_disposable             -e TEAMS_TEST_POSTGRES_URL=postgresql://ci_test:ci_test_password@postgres:5432/teams_disposable             -e TEAMS_DELETE_TEST_POSTGRES_URL=postgresql://ci_test:ci_test_password@postgres:5432/teams_delete_disposable             -e MICROSOFT_E2E_POSTGRES_URL=postgresql://ci_test:ci_test_password@postgres:5432/microsoft_e2e_disposable             -e INTEGRATION_TEST_POSTGRES_URL=postgresql://ci_test:ci_test_password@postgres:5432/integration_disposable             "$image" python -m pytest tests --ignore=tests/test_env_ignore.py -v -ra --junitxml=/tmp/backend-pytest.xml
+          result=0
+          docker start -a "$test_container" || result=$?
+          docker cp "$test_container:/tmp/backend-pytest.xml" "${RUNNER_TEMP}/backend-pytest.xml" || exit 1
+          exit "$result"
+      # El checkout solo contiene backend: la prueba nginx del frontend se omite.
+      - name: Impedir omisiones inesperadas de pruebas
+        run: |
+          python - <<'PYREPORT'
+          import os
+          import xml.etree.ElementTree as ET
+          allowed = ('tests.test_callback_access_logging', 'test_nginx_callback_location_disables_access_logging_and_preserves_proxy')
+          for filename in ('backend-host.xml', 'backend-pytest.xml'):
+              report = ET.parse(os.path.join(os.environ['RUNNER_TEMP'], filename))
+              cases = list(report.iter('testcase'))
+              if not cases:
+                  raise SystemExit(f'Informe vacío: {filename}')
+              unexpected = [case.get('classname', '') + '::' + case.get('name', '')
+                            for case in cases if case.find('skipped') is not None
+                            and (case.get('classname'), case.get('name')) != allowed]
+              if unexpected:
+                  raise SystemExit('Pruebas omitidas inesperadamente: ' + ', '.join(unexpected))
+          PYREPORT
       - name: Verificar que la imagen Docker se construye
         run: docker build --tag chemistry-academy-backend:ci .
 
