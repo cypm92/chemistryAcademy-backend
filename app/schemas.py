@@ -39,7 +39,7 @@ class LoginRequest(BaseModel):
 class UserOut(BaseModel):
     id: int
     name: str
-    email: EmailStr
+    email: str
     role: str
     is_active: bool
     has_avatar: bool
@@ -235,7 +235,7 @@ class AdminClassUpdate(BaseModel):
     starts_at: datetime
     duration_slots: int = Field(ge=1, le=4)
     subject: str = Field(min_length=3, max_length=100)
-    admin_comment: str = Field(default="", max_length=1000)
+    admin_comment: str = ""
 
 
 class BookingStatusUpdate(BaseModel):
@@ -263,7 +263,7 @@ class BookingOut(BaseModel):
 
 
 class BookingRequestOut(BookingOut):
-    user_email: EmailStr | None = None
+    user_email: str | None = None
 
 
 class BookingMaterialCreate(BaseModel):
@@ -271,6 +271,12 @@ class BookingMaterialCreate(BaseModel):
 
 
 class ClassOut(BaseModel):
+    teams_revision: int | None = None
+    teams_unresolved_attempts: int | None = None
+    teams_status: Literal["not_configured", "pending", "ready", "error", "needs_review"] | None = None
+    teams_review_reason: Literal["creation_result_unknown", "event_missing", "recreation_account_mismatch", "patch_result_unknown"] | None = None
+    teams_action: Literal["upsert", "delete"] | None = None
+    teams_join_url: str | None = None
     management_status: Literal["paid", "pending_payment"] | None = None
     id: int
     starts_at: datetime
@@ -281,5 +287,5 @@ class ClassOut(BaseModel):
     admin_comment: str = ""
     user_id: int | None
     user_name: str | None
-    user_email: EmailStr | None
+    user_email: str | None
     materials: list[SharedMaterialOut] = []

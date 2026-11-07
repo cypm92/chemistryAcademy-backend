@@ -5,3 +5,8 @@ storage
 __pycache__
 *.pyc
 
+
+# Exclude environment files and Git metadata at every depth.
+**/.env*
+!**/.env*.example
+**/.git

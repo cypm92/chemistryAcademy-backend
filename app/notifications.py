@@ -4,6 +4,7 @@ SMTP/provider integration deliberately lives here so booking logic stays unchang
 when real email delivery is enabled later.
 """
 import logging
+import os
 import json
 import smtplib
 from uuid import uuid4
@@ -19,7 +20,7 @@ from .models import Booking, ContactRequest, User
 
 logger = logging.getLogger(__name__)
 MADRID = ZoneInfo("Europe/Madrid")
-DEFAULT_RECIPIENTS = ["clases@beciencia.es"]
+DEFAULT_RECIPIENTS = [address.strip() for address in os.environ.get("NOTIFICATION_ADMIN_RECIPIENTS", "clases@beciencia.es").split(",") if address.strip()]
 PROCESSING_LEASE = timedelta(minutes=5)
 
 

@@ -1,0 +1,31 @@
+# Opt-in only: combine with docker-compose.local.yml; never use for production.
+services:
+  backend:
+    command: ["python", "-m", "app.real_local_guard", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload", "--log-config", "app/uvicorn-log.json"]
+    volumes:
+      - beciencia_microsoft_real_local_files:/app/storage
+    environment: &real-microsoft
+      DATABASE_URL: postgresql+psycopg2://beciencia:beciencia_local@db:5432/beciencia_microsoft_real_local
+      MICROSOFT_TENANT_ID: ${REAL_MICROSOFT_TENANT_ID:?Set REAL_MICROSOFT_TENANT_ID in the private local env file}
+      MICROSOFT_CLIENT_ID: ${REAL_MICROSOFT_CLIENT_ID:?Set REAL_MICROSOFT_CLIENT_ID in the private local env file}
+      MICROSOFT_CLIENT_SECRET: ${REAL_MICROSOFT_CLIENT_SECRET:?Set REAL_MICROSOFT_CLIENT_SECRET in the private local env file}
+      MICROSOFT_FERNET_KEY: ${REAL_MICROSOFT_FERNET_KEY:?Set REAL_MICROSOFT_FERNET_KEY in the private local env file}
+      MICROSOFT_REDIRECT_URI: http://localhost:5174/api/integrations/microsoft/callback
+      MICROSOFT_SYNC_ENABLED: 'false'
+      SANDBOX_INJECT: '0'
+      CORS_ORIGINS: http://localhost:5174
+    networks: [isolated, real-egress]
+  notification-worker:
+    command: ["python", "-m", "app.real_local_guard", "python", "-m", "app.notification_worker"]
+    environment: *real-microsoft
+    networks: [isolated, real-egress]
+  frontend:
+    environment:
+      VITE_MICROSOFT_SIMULATED: 'false'
+  gateway:
+    environment:
+      MICROSOFT_REAL_LOCAL: 'true'
+networks:
+  real-egress: {}
+volumes:
+  beciencia_microsoft_real_local_files:
