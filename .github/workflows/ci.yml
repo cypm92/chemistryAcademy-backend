@@ -62,7 +62,7 @@ jobs:
           docker run -d --name "$db" --network "$network" --network-alias postgres             -e POSTGRES_USER=ci_test -e POSTGRES_PASSWORD=ci_test_password             -e POSTGRES_DB=postgres postgres:16-alpine
           ready=false
           for i in $(seq 1 60); do
-            if docker exec "$db" pg_isready -U ci_test -d postgres; then ready=true; break; fi
+            if docker exec "$db" pg_isready -h 127.0.0.1 -U ci_test -d postgres; then ready=true; break; fi
             sleep 1
           done
           test "$ready" = true
