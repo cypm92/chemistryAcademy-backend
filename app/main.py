@@ -13,8 +13,14 @@ from sqlalchemy import delete, inspect, select, text
 from sqlalchemy.orm import Session
 
 from . import models, schemas
+from . import microsoft_oauth_routes
+from .microsoft_auth import lock_generation
+from .teams_sync import detach_deleted_booking, enqueue_booking as enqueue_teams_booking, merge_teams_comment
+from .teams_models import TeamsSyncJob
+from . import microsoft_auth_models, teams_models
+from .microsoft_oauth_routes import router as microsoft_oauth_router, get_config as microsoft_config
 from .config import settings
-from .database import Base, SessionLocal, engine, ensure_booking_management_column, ensure_notification_lease_column, ensure_public_resource_columns, get_db
+from .database import Base, SessionLocal, engine, ensure_application_schema, ensure_booking_management_column, ensure_notification_lease_column, ensure_public_resource_columns, get_db
 from .notifications import (_invalidate_booking_events, enqueue_booking_change, enqueue_booking_decision, enqueue_booking_request, enqueue_contact_request, enqueue_registration, refresh_booking_request,
                             notify_admin_of_booking_request, notify_admin_of_contact_request,
                             notify_student_of_booking_decision, notification_settings)
@@ -136,7 +142,7 @@ def home_content(db: Session) -> dict:
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    Base.metadata.create_all(engine)
+    ensure_application_schema(engine)
     ensure_booking_management_column()
     ensure_notification_lease_column()
     ensure_public_resource_columns()
@@ -154,6 +160,9 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="Chemistry Academy API", version="0.1.0", lifespan=lifespan)
+app.include_router(microsoft_oauth_router)
+from .teams_review_routes import router as teams_review_router
+app.include_router(teams_review_router)
 app.add_middleware(CORSMiddleware, allow_origins=settings.allowed_origins,
                    allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
@@ -608,6 +617,7 @@ def cancel_booking(booking_id: int, user: models.User = Depends(current_user), d
     was_pending = booking.status == "requested"
     booking.status = "cancelled"
     enqueue_booking_change(db, booking, "Clase cancelada", was_pending=was_pending)
+    enqueue_existing_teams_delete(db, booking)
     db.commit(); db.refresh(booking)
     return booking_data(booking, user)
 
@@ -633,6 +643,9 @@ def update_booking_status(booking_id: int, data: schemas.BookingStatusUpdate,
         raise HTTPException(409, "La franja ya está ocupada")
     booking.status = data.status
     enqueue_booking_decision(db, booking)
+    if booking.status == "confirmed":
+        db.flush()
+        enqueue_confirmed_teams_booking(db, booking)
     db.commit(); db.refresh(booking)
     return booking_data(booking, admin, include_user=True)
 
@@ -680,6 +693,25 @@ def update_blocked_range(booking_id: int, data: schemas.BookingBlockCreate,
     return booking_data(booking, admin, include_user=True)
 
 
+def enqueue_confirmed_teams_booking(db: Session, booking: models.Booking):
+    config = microsoft_oauth_routes.get_config()
+    if config is None:
+        return
+    generation = lock_generation(db)
+    if generation.account_object_id and generation.tenant_id == config.tenant:
+        enqueue_teams_booking(db, booking, "upsert")
+
+
+def enqueue_existing_teams_delete(db: Session, booking: models.Booking):
+    job = db.scalar(select(TeamsSyncJob).where(TeamsSyncJob.booking_id == booking.id).with_for_update())
+    if job is not None:
+        if job.join_url:
+            booking.admin_comment = merge_teams_comment(booking.admin_comment, job.join_url, None)
+        enqueue_teams_booking(db, booking, "delete")
+        return True
+    return False
+
+
 @app.post("/admin/classes", response_model=schemas.ClassOut, status_code=201)
 def create_admin_class(data: schemas.AdminBookingCreate, _: models.User = Depends(admin_user), db: Session = Depends(get_db)):
     student = db.get(models.User, data.user_id)
@@ -695,7 +727,9 @@ def create_admin_class(data: schemas.AdminBookingCreate, _: models.User = Depend
     if booking_conflicts(starts_at, ends_at, db):
         raise HTTPException(409, "Ese horario no está disponible")
     booking = models.Booking(user_id=student.id, starts_at=starts_at, ends_at=ends_at, status="confirmed", note=data.subject, admin_comment=data.admin_comment.strip())
-    db.add(booking); db.commit(); db.refresh(booking)
+    db.add(booking); db.flush()
+    enqueue_confirmed_teams_booking(db, booking)
+    db.commit(); db.refresh(booking)
     return class_data(booking)
 
 
@@ -721,9 +755,21 @@ def update_admin_class(booking_id: int, data: schemas.AdminClassUpdate, _: model
     previous_start = booking.starts_at
     changed = (aware(booking.starts_at) != starts_at or aware(booking.ends_at) != ends_at or booking.note != data.subject)
     booking.starts_at, booking.ends_at, booking.note = starts_at, ends_at, data.subject
-    booking.admin_comment = data.admin_comment.strip()
+    job = db.scalar(select(TeamsSyncJob).where(TeamsSyncJob.booking_id == booking.id).with_for_update())
+    comment = data.admin_comment
+    manual_comment = data.admin_comment
+    if (booking.status == "confirmed" and job and job.desired == "upsert" and job.join_url
+            and f"Enlace de Teams: {job.join_url}" in (booking.admin_comment or "").split("\n")):
+        manual_comment = merge_teams_comment(manual_comment, job.join_url, None)
+    if len(manual_comment) > 1000:
+        raise HTTPException(422, "El comentario no puede superar los 1000 caracteres")
+    if booking.status == "confirmed" and job and job.desired == "upsert" and job.join_url:
+        comment = merge_teams_comment(comment, job.join_url, job.join_url)
+    booking.admin_comment = comment
     if changed and booking.status == "confirmed":
         enqueue_booking_change(db, booking, "Clase reprogramada", previous_start)
+        if job is not None:
+            enqueue_teams_booking(db, booking, "upsert")
     elif changed and booking.status == "requested":
         refresh_booking_request(db, booking)
     db.commit(); db.refresh(booking)
@@ -745,14 +791,87 @@ def cancel_admin_class(booking_id: int, _: models.User = Depends(admin_user), db
         _invalidate_booking_events(db, booking.id, ("requested", "confirmed", "declined", "reminder", "Clase reprogramada"))
     else:
         enqueue_booking_change(db, booking, "Clase cancelada", was_pending=was_pending)
+    enqueue_existing_teams_delete(db, booking)
     db.commit(); db.refresh(booking)
     return class_data(booking)
 
 
-def class_data(booking: models.Booking) -> dict:
+def _unresolved_patch_condition():
+    from sqlalchemy import and_, or_
+    from .teams_models import TeamsRemoteOperation
+    return or_(TeamsRemoteOperation.state == 'in_flight',
+               and_(TeamsRemoteOperation.state == 'unknown', TeamsRemoteOperation.reviewed_at.is_(None)))
+
+
+def class_data(booking: models.Booking, job: TeamsSyncJob | None = None, *, student: bool = False, job_loaded: bool = False) -> dict:
     if not (booking.user_id is not None or booking.guest_name or booking.guest_email) or booking.status in {"blocked", "unavailable"}:
         raise HTTPException(400, "Este bloqueo no corresponde a una clase de alumno")
+    if not job_loaded:
+        from sqlalchemy.orm import object_session
+        session = object_session(booking)
+        if session is not None:
+            job = session.scalar(select(TeamsSyncJob).where(TeamsSyncJob.booking_id == booking.id))
+    teams_status, join_url = None, None
+    unresolved = None
+    patch_unknown = False
+    if not student and job:
+        from sqlalchemy.orm import object_session
+        from .teams_models import TeamsCreationAttempt, TeamsRemoteOperation
+        session = object_session(booking)
+        if session is not None:
+            attempts = session.scalars(select(TeamsCreationAttempt).where(
+                TeamsCreationAttempt.job_id == job.id,
+                TeamsCreationAttempt.state.in_(("unknown", "in_flight"))))
+            unresolved = sum(1 for attempt in attempts if attempt.state == "unknown"
+                or attempt.transaction_id != job.transaction_id
+                or job.last_error == "creation_result_unknown")
+            unresolved += len(list(session.scalars(select(TeamsCreationAttempt.id).where(
+                TeamsCreationAttempt.job_id == job.id, TeamsCreationAttempt.needs_review.is_(True),
+                ~TeamsCreationAttempt.state.in_(("unknown", "in_flight"))))))
+            patch_unknown_count = len(list(session.scalars(select(TeamsRemoteOperation.id).where(
+                TeamsRemoteOperation.job_id == job.id,
+                _unresolved_patch_condition()))))
+            patch_unknown = patch_unknown_count > 0
+            unresolved += patch_unknown_count
+    if not student:
+        if job is None:
+            teams_status = "not_configured" if microsoft_oauth_routes.get_config() is None else None
+        elif patch_unknown or job.last_error in {"creation_result_unknown", "event_missing", "recreation_account_mismatch"}:
+            teams_status = "needs_review"
+        elif job.last_error == "manual_reconcile":
+            teams_status = "pending"
+        elif job.last_error:
+            teams_status = "error"
+        elif job.applied_revision < job.revision:
+            teams_status = "error" if job.attempts or job.last_error else "pending"
+        elif (job.applied_revision == job.revision and job.desired == "delete"
+              and not job.attempts and not job.last_error):
+            teams_status = None
+        elif (job.applied_revision == job.revision and job.desired == "upsert"
+              and job.join_url and booking.status == "confirmed"):
+            teams_status, join_url = "ready", job.join_url
+        else:
+            teams_status = "error" if job.attempts or job.last_error else "pending"
+    comment = booking.admin_comment
+    if student and job:
+        from sqlalchemy.orm import object_session
+        from .teams_models import TeamsRemoteOperation
+        session = object_session(booking)
+        if session is not None:
+            patch_unknown = session.scalar(select(TeamsRemoteOperation.id).where(
+                TeamsRemoteOperation.job_id == job.id,
+                _unresolved_patch_condition()).limit(1)) is not None
+    if (student and job and job.join_url and not (
+            booking.status == "confirmed" and job.desired == "upsert"
+            and job.applied_revision == job.revision and not job.last_error and not patch_unknown)):
+        comment = merge_teams_comment(comment, job.join_url, None)
     return {
+        "teams_revision": job.revision if not student and job else None,
+        "teams_unresolved_attempts": unresolved,
+        "teams_status": teams_status,
+        "teams_action": job.desired if not student and job else None,
+        "teams_review_reason": ("patch_result_unknown" if not student and job and patch_unknown else job.last_error if not student and job and job.last_error in {"creation_result_unknown", "event_missing", "recreation_account_mismatch"} else None),
+        "teams_join_url": join_url,
         "id": booking.id,
         "starts_at": booking.starts_at,
         "ends_at": booking.ends_at,
@@ -760,7 +879,7 @@ def class_data(booking: models.Booking) -> dict:
         "is_historical": booking.is_historical,
         "management_status": booking.management_status,
         "topic": booking.note or "Clase particular",
-        "admin_comment": booking.admin_comment,
+        "admin_comment": comment,
         "user_id": booking.user_id,
         "user_name": booking.user.name if booking.user else booking.guest_name,
         "user_email": booking.user.email if booking.user else booking.guest_email,
@@ -778,14 +897,66 @@ def classes(_: models.User = Depends(admin_user), db: Session = Depends(get_db))
         models.Booking.status.notin_({"blocked", "unavailable"}),
         (models.Booking.user_id.is_not(None) | models.Booking.guest_name.is_not(None) | models.Booking.guest_email.is_not(None)),
     ).order_by(models.Booking.starts_at.desc())))
-    return [class_data(booking) for booking in rows]
+    jobs = {job.booking_id: job for job in db.scalars(
+        select(TeamsSyncJob).where(TeamsSyncJob.booking_id.in_([row.id for row in rows]))
+    )} if rows else {}
+    return [class_data(booking, jobs.get(booking.id), job_loaded=True) for booking in rows]
+
+
+@app.post("/admin/classes/{booking_id}/teams/retry", response_model=schemas.ClassOut)
+def retry_class_teams(booking_id: int, _: models.User = Depends(admin_user), db: Session = Depends(get_db)):
+    booking = db.scalar(select(models.Booking).where(models.Booking.id == booking_id).with_for_update())
+    if not booking or not (booking.user_id is not None or booking.guest_name or booking.guest_email):
+        raise HTTPException(404, "Clase no encontrada")
+    job = db.scalar(select(TeamsSyncJob).where(TeamsSyncJob.booking_id == booking_id).with_for_update())
+    if job is None:
+        raise HTTPException(404, "Trabajo de Teams no encontrado")
+    if job.last_error == "recreation_account_mismatch":
+        from .microsoft_auth_models import MicrosoftCredential, MicrosoftOAuthGeneration
+        binding = db.get(MicrosoftOAuthGeneration, 1)
+        credential = db.get(MicrosoftCredential, 1)
+        if (job.recreation_transaction_id != job.transaction_id or not job.recreation_at
+                or not job.recreation_tenant_id or not job.recreation_account_id
+                or not binding or not credential or credential.needs_reconnect
+                or credential.account_object_id != binding.account_object_id
+                or (binding.tenant_id, binding.account_object_id) !=
+                   (job.recreation_tenant_id, job.recreation_account_id)):
+            raise HTTPException(409, "Reconecta la cuenta Microsoft original y vuelve a intentarlo; si no es posible, contacta con soporte")
+    if job.last_error == "event_missing":
+        raise HTTPException(409, "No se encuentra el evento en Microsoft; comprueba el calendario y contacta con soporte")
+    if job.last_error == "creation_result_unknown" or job.creation_in_flight:
+        raise HTTPException(409, "La creación de Teams requiere revisión; comprueba el calendario y contacta con soporte")
+    if (booking.status == "confirmed" and job.desired == "upsert" and job.event_id and job.join_url
+            and job.applied_revision == job.revision and job.last_error
+            and job.last_error.startswith(("graph_error_", "worker_error"))):
+        if job.lease_expires_at and aware(job.lease_expires_at) > datetime.now(timezone.utc):
+            raise HTTPException(409, "Ya hay una comprobación de Teams en curso")
+        # Durable one-shot request: the worker also selects it after the class ends.
+        now = datetime.now(timezone.utc)
+        throttled_until = job.reconcile_at if job.last_error == "graph_error_429" else None
+        job.last_error = "manual_reconcile"
+        job.reconcile_at = max(now, aware(throttled_until)) if throttled_until else now
+        db.commit()
+        return class_data(booking, job, job_loaded=True)
+    if ((booking.status, job.desired) not in {("confirmed", "upsert"), ("cancelled", "delete")}
+            or job.applied_revision >= job.revision):
+        raise HTTPException(400, "El trabajo de Teams no está pendiente")
+    job.attempts = 0
+    job.last_error = None
+    job.available_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(booking)
+    return class_data(booking, job, job_loaded=True)
 
 
 @app.get("/classes", response_model=list[schemas.ClassOut])
 def my_classes(user: models.User = Depends(current_user), db: Session = Depends(get_db)):
-    rows = list(db.scalars(select(models.Booking).where(models.Booking.user_id == user.id, models.Booking.is_historical.is_(False))
-                           .order_by(models.Booking.starts_at.desc())))
-    return [{**class_data(booking), "management_status": None} for booking in rows]
+    rows = db.execute(select(models.Booking, TeamsSyncJob).outerjoin(
+        TeamsSyncJob, TeamsSyncJob.booking_id == models.Booking.id
+    ).where(models.Booking.user_id == user.id, models.Booking.is_historical.is_(False))
+        .order_by(models.Booking.starts_at.desc())).all()
+    return [{**class_data(booking, job, student=True, job_loaded=True), "management_status": None}
+            for booking, job in rows]
 
 
 @app.patch("/admin/classes/{booking_id}/management", response_model=schemas.ClassOut)
@@ -812,14 +983,43 @@ def set_class_historical(booking_id: int, data: schemas.ClassHistoricalUpdate,
     return class_data(booking)
 
 
+def ensure_teams_creation_safe_to_delete(db: Session, booking: models.Booking):
+    # Caller holds the booking lock before acquiring the job lock.
+    job = db.scalar(select(TeamsSyncJob).where(
+        TeamsSyncJob.booking_id == booking.id
+    ).with_for_update().execution_options(populate_existing=True))
+    if not job:
+        return
+    from .teams_models import TeamsCreationAttempt, TeamsRemoteOperation
+    uncertain = (job.creation_in_flight or job.last_error == "creation_result_unknown"
+        or db.scalar(select(TeamsCreationAttempt.id).where(
+            TeamsCreationAttempt.job_id == job.id,
+            TeamsCreationAttempt.state.in_(("unknown", "in_flight"))).limit(1)) is not None
+        or db.scalar(select(TeamsCreationAttempt.id).where(
+            TeamsCreationAttempt.job_id == job.id,
+            TeamsCreationAttempt.needs_review.is_(True)).limit(1)) is not None
+        or db.scalar(select(TeamsRemoteOperation.id).where(
+            TeamsRemoteOperation.job_id == job.id,
+            _unresolved_patch_condition()).limit(1)) is not None)
+    if uncertain:
+        raise HTTPException(409, "La sincronización de Teams requiere revisión; comprueba Outlook y contacta con soporte antes de eliminar")
+    # An expired lease alone does not prove that its remote request ended.
+    if (job.desired != "delete" or job.revision != job.applied_revision
+            or job.event_id or job.join_url or job.lease_token or job.lease_expires_at):
+        raise HTTPException(409, "Cancela la clase y espera la sincronización de Teams antes de eliminar")
+
+
 @app.delete("/admin/classes/{booking_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_class(booking_id: int, _: models.User = Depends(admin_user), db: Session = Depends(get_db)):
-    booking = db.get(models.Booking, booking_id)
+    booking = db.scalar(select(models.Booking).where(models.Booking.id == booking_id).with_for_update())
     if not booking or booking.status in {"blocked", "unavailable"} or not (booking.user_id is not None or booking.guest_name or booking.guest_email):
         raise HTTPException(404, "Clase no encontrada")
     is_future = aware(booking.starts_at) > datetime.now(timezone.utc)
     if booking.status != "declined" and not is_future:
         raise HTTPException(400, "Solo puedes eliminar clases futuras o solicitudes denegadas")
+    ensure_teams_creation_safe_to_delete(db, booking)
+    if db.scalar(select(TeamsSyncJob.id).where(TeamsSyncJob.booking_id == booking.id)) is not None:
+        detach_deleted_booking(db, booking)
     db.delete(booking)
     db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
@@ -916,10 +1116,11 @@ def create_user(data: schemas.AdminUserCreate, _: models.User = Depends(admin_us
 @app.patch("/admin/users/{user_id}", response_model=schemas.UserOut)
 def update_user(user_id: int, data: schemas.AdminUserUpdate, admin: models.User = Depends(admin_user),
                 db: Session = Depends(get_db)):
-    user = db.get(models.User, user_id)
+    user = db.scalar(select(models.User).where(models.User.id == user_id).with_for_update())
     if not user:
         raise HTTPException(404, "Usuario no encontrado")
     changes = data.model_dump(exclude_unset=True)
+    old_identity = (user.name, user.email)
     if "role" in changes and changes["role"] not in {"guest", "admin"}:
         raise HTTPException(400, "Rol no válido")
     if "email" in changes:
@@ -940,19 +1141,37 @@ def update_user(user_id: int, data: schemas.AdminUserUpdate, admin: models.User 
         if user.id == admin.id and changes["role"] != "admin":
             raise HTTPException(400, "No puedes retirar tu propio rol de administrador")
         user.role = changes["role"]
+    if (user.name, user.email) != old_identity:
+        bookings = db.scalars(select(models.Booking).where(
+            models.Booking.user_id == user_id, models.Booking.status == "confirmed"
+        ).order_by(models.Booking.id).with_for_update()).all()
+        for booking in bookings:
+            job = db.scalar(select(TeamsSyncJob).where(
+                TeamsSyncJob.booking_id == booking.id
+            ).with_for_update())
+            if job and job.desired == "upsert":
+                enqueue_teams_booking(db, booking, "upsert")
     db.commit(); db.refresh(user)
     return user
 
 
 @app.delete("/admin/users/{user_id}", status_code=204)
 def delete_user(user_id: int, admin: models.User = Depends(admin_user), db: Session = Depends(get_db)):
-    user = db.get(models.User, user_id)
+    user = db.scalar(select(models.User).where(models.User.id == user_id).with_for_update())
     if not user:
         raise HTTPException(404, "Usuario no encontrado")
     if user.id == admin.id:
         raise HTTPException(400, "No puedes eliminar tu propia cuenta")
     if user.role == "admin":
         raise HTTPException(400, "No se pueden eliminar cuentas de administrador")
+    # The user lock conflicts with the FK key-share lock taken by new bookings.
+    bookings = db.scalars(select(models.Booking).where(models.Booking.user_id == user_id)
+                          .order_by(models.Booking.id).with_for_update()).all()
+    for booking in bookings:
+        ensure_teams_creation_safe_to_delete(db, booking)
+    for booking in bookings:
+        if db.scalar(select(TeamsSyncJob.id).where(TeamsSyncJob.booking_id == booking.id)) is not None:
+            detach_deleted_booking(db, booking)
     db.execute(delete(models.AccessGrant).where(models.AccessGrant.user_id == user_id))
     db.delete(user)
     db.commit()

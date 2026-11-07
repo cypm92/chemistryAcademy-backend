@@ -27,12 +27,17 @@ Copy-Item .env.local.example .env.local
 docker compose --env-file .env.local -f docker-compose.local.yml up -d --build
 ```
 
-Abre `http://localhost:5174`. La API local estará en
-`http://localhost:8001`, y Vite redirige automáticamente las llamadas `/api`
-al backend dentro de Docker. El worker de notificaciones también se ejecuta en un
-contenedor separado, con la misma imagen del backend. En desarrollo usa
-`SMTP_MODE=log`: registra la simulación y no envía correos reales. Para ver sus
-logs:
+Abre `http://127.0.0.1:5174`; la API se accede mediante `/api` en ese mismo origen.
+El simulador Microsoft ficticio está en `http://127.0.0.1:5174/fake/`;
+consulta `local-microsoft-sandbox/RUN.md` antes de usarlo. No uses cuentas ni
+secretos reales. El worker utiliza SMTP hacia Mailpit, accesible en `http://127.0.0.1:8025`.
+Mailpit no publica SMTP ni tiene red externa; su buzón no es persistente entre
+recreaciones. El backend envía nuevas notificaciones administrativas a
+`preview@example.com` únicamente en este Compose. El planificador del worker
+sigue activo: antes de reiniciarlo, revisa la cola y los informes y recordatorios
+vencidos, porque puede generar mensajes adicionales con datos existentes. Sus
+informes conservan el destinatario administrativo predeterminado, aunque Mailpit
+no los entrega a Internet. Para ver sus logs:
 
 ```powershell
 docker compose --env-file .env.local -f docker-compose.local.yml logs -f notification-worker
@@ -61,6 +66,35 @@ docker compose --env-file .env.local -f docker-compose.local.yml down
 Los datos locales se conservan al parar los contenedores. Si quieres borrar
 solo el entorno local y empezar desde cero, usa `down -v` con el mismo comando.
 Nunca uses esa opción contra producción.
+
+#### Sincronización de Teams (opt-in)
+
+El worker consulta cada 60 segundos. Primero genera informes y recordatorios y
+procesa el correo; después procesa como máximo cinco trabajos de Teams por ciclo.
+Fuera de la simulación local descrita en `local-microsoft-sandbox/RUN.md`,
+`MICROSOFT_SYNC_ENABLED` está desactivado por omisión. El valor explícito `true`
+lo habilita únicamente si la configuración Microsoft es válida y completa
+(`MICROSOFT_TENANT_ID`, `MICROSOFT_CLIENT_ID`, `MICROSOFT_CLIENT_SECRET`,
+`MICROSOFT_REDIRECT_URI` y `MICROSOFT_FERNET_KEY`). En el Compose local se usa
+un proveedor ficticio; en un entorno real, habilitarlo permite llamadas reales.
+La cuenta debe conectarse antes de procesar trabajos. Un fallo de sincronización
+no impide procesar el correo, y los access tokens no se guardan.
+
+Las reuniones ya sincronizadas no se comprueban periódicamente en Outlook.
+Se mantienen los reintentos de trabajos pendientes y las comprobaciones
+puntuales solicitadas para resolver errores. Una operación remota tardía tras
+un fallo del worker podría dejar una discrepancia que no se detectará sola.
+
+Si Microsoft no confirma si creó un evento, la clase muestra «Necesita revisión»
+y la sincronización no repite automáticamente la creación. La administradora
+debe revisar primero Outlook: si comprueba que no existe, puede confirmar un
+nuevo intento desde la clase. La operación anterior podría terminar después de
+esa comprobación y producir un duplicado; las incidencias se conservan para su
+revisión y no se borran eventos huérfanos automáticamente. Si la identidad de la
+cuenta no coincide, se requiere revisión y no se autoriza la recreación. No se
+crean reuniones automáticamente para clases confirmadas antes de conectar la
+cuenta. Una operación ya iniciada puede terminar después de desconectar, y la
+desconexión no revoca por sí misma los permisos concedidos en Microsoft.
 
 #### Cargar datos ficticios para probar la plataforma
 
@@ -180,8 +214,18 @@ python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 Copy-Item .env.example .env
-uvicorn app.main:app --reload
+uvicorn app.main:app --reload --log-config app/uvicorn-log.json
 ```
+
+**Antes de activar Microsoft OAuth o desplegar:** usa siempre la configuración
+`app/uvicorn-log.json` (también en comandos personalizados y workers de Uvicorn).
+Redacta la consulta del callback únicamente en los access logs estándar de
+Uvicorn; Nginx desactiva su access log para esa ruta exacta. No protege error
+logs, otros formatos de logging, trazas, APM ni proxies/collectors adicionales.
+Aunque la configuración actual de Caddy no habilita access logs, antes del
+despliegue hay que revisar y proteger Caddy y cada proxy, CDN, balanceador,
+colector y herramienta de observabilidad para que nunca registren ni capturen
+la query completa del callback. Verifica también configuraciones personalizadas.
 
 En otra terminal, desde la carpeta hermana `frontend`:
 
