@@ -23,8 +23,8 @@
 
 ## Memoria del proyecto
 Las decisiones de producto y arquitectura de Chemistry Academy están en
-**`../02-DOCS/`**, un repositorio propio compartido por los tres componentes
-(`chemistryAcademy-docs`). Consúltalo antes de planear o implementar; no
+**`../02-DOCS/`**, carpeta del repositorio `chemistryAcademy-docs`, que es la capa
+común compartida por los tres componentes. Consúltalo antes de planear o implementar; no
 copies su contenido aquí, para que no existan dos versiones.
 
 - `../02-DOCS/índice.md` — inventario, mapa tecnológico y qué va en el brain.
