@@ -49,7 +49,7 @@ const server = http.createServer((req, res) => {
       }
       if (!config.real && out.location) out.location=out.location.replace('https://login.microsoftonline.com/', LOCAL+'/fake/');
       if (host === 'fake-microsoft' && out.location === '/') out.location = '/fake/';
-      out['content-security-policy']="default-src 'self' data: blob:; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data: blob:; frame-src 'self'; form-action 'self'; base-uri 'self'";
+      out['content-security-policy']="default-src 'self' data: blob:; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; connect-src 'self' blob:; img-src 'self' data: blob:; frame-src 'self'; form-action 'self'; base-uri 'self'";
       res.writeHead(response.statusCode,out); res.end(body);
     });
   });
