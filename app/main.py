@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 import json
 import re
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile, status
@@ -1555,7 +1555,7 @@ def content(material_id: int, download: bool = False, range_header: str | None =
     if not path.exists():
         raise HTTPException(404, "El archivo no está disponible")
     disposition = "attachment" if download else "inline"
-    headers = {"Content-Disposition": f'{disposition}; filename="{material.filename}"',
+    headers = {"Content-Disposition": f"{disposition}; filename*=UTF-8''{quote(material.filename, safe='')}",
                "Cache-Control": "private, no-store", "Accept-Ranges": "bytes",
                "X-Content-Type-Options": "nosniff"}
     if not range_header or not material.kind == "video":
