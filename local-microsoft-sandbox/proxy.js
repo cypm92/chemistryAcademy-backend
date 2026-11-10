@@ -26,8 +26,7 @@ const server = http.createServer((req, res) => {
   // Never forward absolute-form or authority-form targets to an upstream.
   if (!url.startsWith('/') || url.startsWith('//') || url.includes('\\') || req.headers.upgrade) { res.writeHead(400); return res.end('Invalid path'); }
   let host = 'frontend', port = config.frontendPort, path = url;
-  if (url.startsWith('/api/')) { host = 'backend'; port = 8000; path = url.slice(4); }
-  else if (url.startsWith('/fake/')) { host = 'fake-microsoft'; port = 8080; path = url.slice(5); }
+  if (url.startsWith('/fake/')) { host = 'fake-microsoft'; port = 8080; path = url.slice(5); }
   const headers = {...req.headers, host: host === 'frontend' ? req.headers.host : host, 'accept-encoding': 'identity'};
   const forward = (requestBody) => {
   if (requestBody) { delete headers['transfer-encoding']; headers['content-length'] = requestBody.length; }

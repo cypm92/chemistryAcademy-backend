@@ -31,7 +31,7 @@ test('HTTP routing, rewrites and invalid target rejection', async () => {
   }
   try {
     let res = await request('/api/test?x=1');
-    assert.equal(seen.at(-1).path, '/test?x=1'); assert.equal(seen.at(-1).host, 'backend');
+    assert.equal(seen.at(-1).path, '/api/test?x=1'); assert.equal(seen.at(-1).host, 'localhost:5174');
     assert.match(res.body, /http:\/\/127\.0\.0\.1:5174\/fake\/meeting\/fake-event-123/);
     assert.match(res.body, /http:\/\/127\.0\.0\.1:5174\/fake\/authorize/);
     await request('/fake/controls', '127.0.0.1:5174'); assert.equal(seen.at(-1).path, '/controls'); assert.equal(seen.at(-1).host,'fake-microsoft');

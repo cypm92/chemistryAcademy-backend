@@ -1,7 +1,7 @@
 name: beciencia-local
 
 # Entorno exclusivo de desarrollo: no comparte volúmenes, credenciales ni red
-# con producción. El frontend ejecuta Vite en Docker con recarga al guardar.
+# con producción. Las aplicaciones se sirven desde imágenes compiladas.
 services:
   db:
     image: postgres:16-alpine
@@ -22,7 +22,7 @@ services:
     image: beciencia-local-backend:local
     build:
       context: .
-    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload", "--log-config", "app/uvicorn-log.json"]
+
     environment:
       DATABASE_URL: postgresql+psycopg2://beciencia:beciencia_local@db:5432/beciencia_local
       SECRET_KEY: ${LOCAL_SECRET_KEY:?Copia .env.local.example a .env.local y define LOCAL_SECRET_KEY}
@@ -44,8 +44,6 @@ services:
       SANDBOX_INJECT: '1'
       CORS_ORIGINS: http://localhost:${LOCAL_FRONTEND_PORT:-5174},http://127.0.0.1:${LOCAL_FRONTEND_PORT:-5174}
     volumes:
-      - ./app:/app/app
-      - ./tests:/app/tests:ro
       - ./local-microsoft-sandbox:/sandbox:ro
       - beciencia_local_files:/app/storage
     networks: [isolated]
@@ -77,7 +75,6 @@ services:
       PYTHONPATH: /sandbox:/app
       SANDBOX_INJECT: '1'
     volumes:
-      - ./app:/app/app
       - ./local-microsoft-sandbox:/sandbox:ro
     networks: [isolated]
     depends_on:
@@ -87,18 +84,12 @@ services:
         condition: service_started
 
   frontend:
-    image: node:22-alpine@sha256:b6f26b36c8ff49624cfdac716b8ea1138d606df02586a77d364bb5536a634f85
-    working_dir: /app
-    command: ["sh", "-c", "test -x node_modules/.bin/vite || { echo Install frontend dependencies first; exit 1; }; node_modules/.bin/vite --host 0.0.0.0"]
-    environment:
-      VITE_DEV_PORT: 5174
-      VITE_DEV_API_TARGET: http://backend:8000
-      CHOKIDAR_USEPOLLING: "true"
-      COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
-      VITE_MICROSOFT_SIMULATED: 'true'
-    volumes:
-      - ../frontend:/app
-      - beciencia_local_frontend_node_modules:/app/node_modules
+    image: beciencia-local-frontend:local
+    build:
+      context: ../frontend
+      args:
+        VITE_LOCAL_SANDBOX_BUILD: 'true'
+        VITE_MICROSOFT_SIMULATED: 'true'
     networks: [isolated]
     depends_on:
       - backend
@@ -130,7 +121,7 @@ services:
     command: [node, /sandbox/proxy.js]
     environment:
       SANDBOX_PUBLIC_PORT: '5174'
-      SANDBOX_FRONTEND_PORT: '5174'
+      SANDBOX_FRONTEND_PORT: '80'
     volumes:
       - ./local-microsoft-sandbox:/sandbox:ro
     ports:

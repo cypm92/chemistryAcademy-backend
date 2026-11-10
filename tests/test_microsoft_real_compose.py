@@ -22,6 +22,9 @@ def test_real_compose_is_separate_and_opt_in():
         assert e['MICROSOFT_REDIRECT_URI'] == 'http://localhost:5174/api/integrations/microsoft/callback'
         assert 'real-egress' in overlay['services'][name]['networks']
     assert overlay['services']['frontend']['environment']['VITE_MICROSOFT_SIMULATED'] == 'false'
+    assert overlay['services']['frontend']['build']['args']['VITE_LOCAL_SANDBOX_BUILD'] == 'false'
+    assert overlay['services']['frontend']['build']['args']['VITE_MICROSOFT_SIMULATED'] == 'false'
+    assert overlay['services']['frontend']['image'] != fake['services']['frontend']['image']
     assert overlay['services']['gateway']['environment']['MICROSOFT_REAL_LOCAL'] == 'true'
     assert fake['services']['notification-worker']['environment']['SMTP_HOST'] == 'mailpit'
     assert fake['services']['notification-worker']['environment']['SMTP_PASSWORD'] == ''
