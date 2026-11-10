@@ -14,11 +14,13 @@ accesos individuales y fecha de caducidad.
 
 ## Arranque rápido
 
-### Desarrollo visual rápido (recomendado para cambios de interfaz)
+### Entorno local con imágenes de aplicación compiladas
 
-Este modo ejecuta PostgreSQL, backend y frontend en Docker. El frontend usa
-Vite con el código montado desde `../frontend`: al guardar un cambio en Vue o
-CSS, el navegador se actualiza sin reconstruir la imagen ni desplegar en el VPS.
+Este modo ejecuta PostgreSQL, backend y frontend en Docker. El frontend se
+compila con su Dockerfile y se sirve con Nginx; el backend y el worker usan la
+imagen compilada. Tras modificar código hay que reconstruir las imágenes.
+La simulación Microsoft usa una compilación local explícita, distinta del
+artefacto de producción; no emplea cuentas ni servicios reales.
 
 La primera vez, desde la carpeta `backend`:
 

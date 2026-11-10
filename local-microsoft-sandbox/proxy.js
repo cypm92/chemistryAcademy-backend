@@ -26,8 +26,7 @@ const server = http.createServer((req, res) => {
   // Never forward absolute-form or authority-form targets to an upstream.
   if (!url.startsWith('/') || url.startsWith('//') || url.includes('\\') || req.headers.upgrade) { res.writeHead(400); return res.end('Invalid path'); }
   let host = 'frontend', port = config.frontendPort, path = url;
-  if (url.startsWith('/api/')) { host = 'backend'; port = 8000; path = url.slice(4); }
-  else if (url.startsWith('/fake/')) { host = 'fake-microsoft'; port = 8080; path = url.slice(5); }
+  if (url.startsWith('/fake/')) { host = 'fake-microsoft'; port = 8080; path = url.slice(5); }
   const headers = {...req.headers, host: host === 'frontend' ? req.headers.host : host, 'accept-encoding': 'identity'};
   const forward = (requestBody) => {
   if (requestBody) { delete headers['transfer-encoding']; headers['content-length'] = requestBody.length; }
@@ -49,7 +48,7 @@ const server = http.createServer((req, res) => {
       }
       if (!config.real && out.location) out.location=out.location.replace('https://login.microsoftonline.com/', LOCAL+'/fake/');
       if (host === 'fake-microsoft' && out.location === '/') out.location = '/fake/';
-      out['content-security-policy']="default-src 'self' data: blob:; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data: blob:; frame-src 'self'; form-action 'self'; base-uri 'self'";
+      out['content-security-policy']="default-src 'self' data: blob:; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; connect-src 'self' blob:; img-src 'self' data: blob:; frame-src 'self'; form-action 'self'; base-uri 'self'";
       res.writeHead(response.statusCode,out); res.end(body);
     });
   });

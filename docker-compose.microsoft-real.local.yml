@@ -20,6 +20,11 @@ services:
     environment: *real-microsoft
     networks: [isolated, real-egress]
   frontend:
+    image: beciencia-local-frontend-real:local
+    build:
+      args:
+        VITE_LOCAL_SANDBOX_BUILD: 'false'
+        VITE_MICROSOFT_SIMULATED: 'false'
     environment:
       VITE_MICROSOFT_SIMULATED: 'false'
   gateway:
