@@ -100,7 +100,7 @@ def test_confirmation_and_creation_respect_binding(booking_context, monkeypatch,
         assert (job is not None) == (binding == 'enabled')
         if job:
             assert job.desired == 'upsert'
-            assert ('guest@example.com' if route == 'guest' else 'student@example.com') in job.subject
+            assert ('guest@example.com' if route == 'guest' else 'student@example.com') not in job.subject
 
 
 @pytest.mark.parametrize('route', ['guest', 'student', 'direct'])
@@ -272,6 +272,22 @@ def test_stale_comment_preserves_managed_link(booking_context):
         assert db.get(models.Booking, booking_id).admin_comment == 'new manual comment\nEnlace de Teams: https://managed.example/join'
 
 
+def test_email_only_change_does_not_reenqueue_teams_job(booking_context):
+    from app.teams_sync import enqueue_booking
+    sessions, client, (admin_id, student_id) = booking_context
+    start = (datetime.now(timezone.utc) + timedelta(days=14)).replace(hour=10, minute=0, second=0, microsecond=0)
+    with sessions.begin() as db:
+        booking = models.Booking(user_id=student_id, starts_at=start, ends_at=start + timedelta(hours=1), status='confirmed', note='Química ESO')
+        db.add(booking); db.flush(); booking_id = booking.id
+        enqueue_booking(db, booking, 'upsert')
+    response = client.patch(f'/admin/users/{student_id}', headers={'Authorization': f'Bearer {create_token(admin_id)}'}, json={'email': 'new@example.com'})
+    assert response.status_code == 200, response.text
+    with sessions() as db:
+        job = db.scalar(select(TeamsSyncJob).where(TeamsSyncJob.booking_id == booking_id))
+        assert job.revision == 1
+        assert db.get(models.User, student_id).email == 'new@example.com'
+
+
 def test_user_identity_change_updates_existing_job_only(booking_context, monkeypatch):
     from app.teams_sync import enqueue_booking
     sessions, client, (admin_id, student_id) = booking_context
@@ -287,7 +303,7 @@ def test_user_identity_change_updates_existing_job_only(booking_context, monkeyp
     with sessions() as db:
         job = db.scalar(select(TeamsSyncJob).where(TeamsSyncJob.booking_id == managed_id))
         assert job.revision == 2
-        assert job.subject.startswith('New Name_') and job.subject.endswith('_new@example.com')
+        assert job.subject.startswith('New Name_') and 'new@example.com' not in job.subject
         assert db.scalar(select(TeamsSyncJob).where(TeamsSyncJob.booking_id == legacy_id)) is None
 
 

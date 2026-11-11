@@ -1120,7 +1120,7 @@ def update_user(user_id: int, data: schemas.AdminUserUpdate, admin: models.User 
     if not user:
         raise HTTPException(404, "Usuario no encontrado")
     changes = data.model_dump(exclude_unset=True)
-    old_identity = (user.name, user.email)
+    old_name = user.name
     if "role" in changes and changes["role"] not in {"guest", "admin"}:
         raise HTTPException(400, "Rol no válido")
     if "email" in changes:
@@ -1141,7 +1141,7 @@ def update_user(user_id: int, data: schemas.AdminUserUpdate, admin: models.User 
         if user.id == admin.id and changes["role"] != "admin":
             raise HTTPException(400, "No puedes retirar tu propio rol de administrador")
         user.role = changes["role"]
-    if (user.name, user.email) != old_identity:
+    if user.name != old_name:
         bookings = db.scalars(select(models.Booking).where(
             models.Booking.user_id == user_id, models.Booking.status == "confirmed"
         ).order_by(models.Booking.id).with_for_update()).all()
