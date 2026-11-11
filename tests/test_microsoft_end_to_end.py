@@ -138,7 +138,7 @@ def test_guest_booking_reconcile_retry_edit_cancel(scenario, monkeypatch):
     assert len(posts) == 2
     first, second = [json.loads(r.content) for r in posts]
     assert first == second and first['transactionId']
-    assert first['subject'] == f"Invitada_{start.astimezone(ZoneInfo('Europe/Madrid')):%d-%m-%Y %H:%M}_guest@example.com"
+    assert first['subject'] == f"Invitada_{start.astimezone(ZoneInfo('Europe/Madrid')):%d-%m-%Y %H:%M}"
     assert 'attendees' not in first
     assert first['start'] == {'dateTime': start.replace(tzinfo=None).isoformat(), 'timeZone': 'UTC'}
     assert first['end'] == {'dateTime': (start + timedelta(hours=1)).replace(tzinfo=None).isoformat(), 'timeZone': 'UTC'}

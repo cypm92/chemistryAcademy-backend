@@ -134,7 +134,7 @@ def test_identity_change_while_worker_in_flight(pg_sessions):
         with sessions() as db:
             job = db.scalar(select(TeamsSyncJob).where(TeamsSyncJob.booking_id == booking_id))
             assert job.revision == 2 and job.applied_revision < job.revision
-            assert job.subject.startswith('New Name_') and job.subject.endswith('_new@example.com')
+            assert job.subject.startswith('New Name_') and 'new@example.com' not in job.subject
     finally:
         release.set(); thread.join(10)
         app.dependency_overrides.clear()

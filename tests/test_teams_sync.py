@@ -11,6 +11,23 @@ from app.teams_models import TeamsSyncJob
 from app.teams_sync import enqueue_booking, merge_teams_comment
 
 
+def test_new_titles_omit_email_for_guests_and_registered_students():
+    engine = create_engine('sqlite://')
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(engine)
+    with Session.begin() as db:
+        seed_account(db)
+        for booking in (
+            SimpleNamespace(id=101, starts_at=datetime(2026, 1, 1, 12, tzinfo=timezone.utc), ends_at=datetime(2026, 1, 1, 13, tzinfo=timezone.utc), guest_name='Ana', guest_email='ana@example.org', user=None),
+            SimpleNamespace(id=102, starts_at=datetime(2026, 7, 1, 12, tzinfo=timezone.utc), ends_at=datetime(2026, 7, 1, 13, tzinfo=timezone.utc), guest_name=None, guest_email=None, user=SimpleNamespace(name='Luis', email='luis@example.org')),
+        ):
+            enqueue_booking(db, booking, 'upsert')
+    with Session() as db:
+        jobs = {job.booking_key: job.subject for job in db.scalars(select(TeamsSyncJob))}
+        assert jobs['booking:101'] == 'Ana_01-01-2026 13:00'
+        assert jobs['booking:102'] == 'Luis_01-07-2026 14:00'
+
+
 def test_comment_replaces_only_old_link_and_preserves_user_text():
     old = 'https://old.example/x'
     new = 'https://new.example/y'
@@ -61,7 +78,9 @@ def test_worker_creates_event_and_persists_identity():
     with Session.begin() as db:
         enqueue_booking(db, booking, 'upsert')
     def respond(request):
+        import json
         assert request.method == 'POST'
+        assert json.loads(request.content)['subject'] == 'Ana_01-01-2026 13:00'
         return httpx.Response(201, json={'id': 'event-1', 'onlineMeeting': {'joinUrl': 'https://teams.microsoft.com/meeting'}})
     with httpx.Client(transport=httpx.MockTransport(respond)) as client:
         process_pending(Session, lambda: IDENTITY, client)

@@ -70,11 +70,10 @@ def enqueue_booking(db, booking, desired):
         raise ValueError('booking must have an id')
     user = booking.user
     name = user.name if user else booking.guest_name
-    email = user.email if user else booking.guest_email
     starts = booking.starts_at
     # Application database values represent UTC, even if SQLite drops tzinfo.
     local = (starts.replace(tzinfo=timezone.utc) if starts.tzinfo is None else starts).astimezone(ZoneInfo('Europe/Madrid'))
-    subject = f'{name or ""}_{local:%d-%m-%Y %H:%M}_{email or ""}'
+    subject = f'{name or ""}_{local:%d-%m-%Y %H:%M}'
     from sqlalchemy import case
     table = TeamsSyncJob.__table__
     dialect = db.get_bind().dialect.name
