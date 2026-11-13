@@ -1,8 +1,9 @@
 import unittest
 from unittest.mock import patch
 
-from sqlalchemy import create_engine, select
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy import select
+
+from ephemeral_postgres import ephemeral_postgres
 
 from app import models
 from app.config import settings
@@ -13,9 +14,13 @@ from app.security import hash_password, verify_password
 
 class AdminBootstrapTest(unittest.TestCase):
     def test_restart_preserves_existing_admin_password(self):
-        engine = create_engine("sqlite+pysqlite:///:memory:")
+        context = ephemeral_postgres()
+        database = context.__enter__()
+        self.addCleanup(context.__exit__, None, None, None)
+        engine = database.engine
+        self.assertEqual(engine.dialect.name, "postgresql")
         Base.metadata.create_all(engine)
-        sessions = sessionmaker(bind=engine)
+        sessions = database.session_factory
 
         with patch("app.main.SessionLocal", sessions):
             seed_admin()

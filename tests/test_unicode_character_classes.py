@@ -14,9 +14,8 @@ from urllib.parse import unquote
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
+
+from ephemeral_postgres import postgres_test_db
 
 from app import models
 from app.database import Base, get_db
@@ -26,15 +25,11 @@ from app.storage import storage
 
 
 @pytest.fixture
-def material_client(tmp_path, monkeypatch):
-    """Cliente HTTP con base de datos SQLite en memoria y almacenamiento temporal."""
-    engine = create_engine(
-        "sqlite+pysqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
+def material_client(tmp_path, monkeypatch, postgres_test_db):
+    """Cliente HTTP con base de datos PostgreSQL efímera y almacenamiento temporal."""
+    engine = postgres_test_db.engine
     Base.metadata.create_all(engine)
-    sessions = sessionmaker(bind=engine)
+    sessions = postgres_test_db.session_factory
 
     def local_db():
         with sessions() as db:

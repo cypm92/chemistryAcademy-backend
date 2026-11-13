@@ -1,13 +1,14 @@
 from teams_identity_fixtures import IDENTITY, seed_account, seed_identified_event
-import os
+
 from datetime import datetime, timedelta, timezone
 from threading import Event, Thread
-from uuid import uuid4
+
 
 import httpx
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, select, text
+from sqlalchemy import select, text
+from ephemeral_postgres import postgres_test_db
 from sqlalchemy.orm import sessionmaker
 
 from app import models
@@ -19,25 +20,13 @@ from app.teams_sync import enqueue_booking, process_pending
 
 
 @pytest.fixture
-def pg_sessions():
-    url = os.getenv('TEAMS_TEST_POSTGRES_URL')
-    if not url:
-        pytest.skip('requires disposable PostgreSQL')
-    assert url.startswith(('postgresql://', 'postgresql+psycopg2://'))
-    admin = create_engine(url)
-    schema = 'teams_edit_' + uuid4().hex
-    with admin.begin() as db:
-        db.execute(text(f'CREATE SCHEMA {schema}'))
-    engine = create_engine(url, connect_args={'options': f'-csearch_path={schema}'})
+def pg_sessions(postgres_test_db):
+    engine = postgres_test_db.engine
     Base.metadata.create_all(engine)
     factory = sessionmaker(engine)
     with factory.begin() as db:
         seed_account(db)
     yield factory
-    engine.dispose()
-    with admin.begin() as db:
-        db.execute(text(f'DROP SCHEMA {schema} CASCADE'))
-    admin.dispose()
 
 
 def test_stale_patch_races_worker_completion(pg_sessions):

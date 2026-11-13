@@ -2,8 +2,8 @@ from teams_identity_fixtures import IDENTITY, seed_account, seed_identified_even
 from types import SimpleNamespace
 from datetime import datetime, timezone
 
-from sqlalchemy import create_engine, select
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy import select
+from ephemeral_postgres import postgres_test_db
 
 from app.database import Base
 from app import models
@@ -11,10 +11,10 @@ from app.teams_models import TeamsSyncJob
 from app.teams_sync import enqueue_booking, merge_teams_comment
 
 
-def test_new_titles_omit_email_for_guests_and_registered_students():
-    engine = create_engine('sqlite://')
+def test_new_titles_omit_email_for_guests_and_registered_students(postgres_test_db):
+    engine = postgres_test_db.engine
     Base.metadata.create_all(engine)
-    Session = sessionmaker(engine)
+    Session = postgres_test_db.session_factory
     with Session.begin() as db:
         seed_account(db)
         for booking in (
@@ -38,10 +38,10 @@ def test_comment_replaces_only_old_link_and_preserves_user_text():
     assert merge_teams_comment('Enlace de Teams: https://attacker.example/x', old, None) == 'Enlace de Teams: https://attacker.example/x'
 
 
-def test_enqueue_is_transactional_and_increments_revision():
-    engine = create_engine('sqlite://')
+def test_enqueue_is_transactional_and_increments_revision(postgres_test_db):
+    engine = postgres_test_db.engine
     Base.metadata.create_all(engine)
-    Session = sessionmaker(engine)
+    Session = postgres_test_db.session_factory
     with Session.begin() as db:
         seed_account(db)
     booking = SimpleNamespace(id=9, starts_at=datetime(2026, 1, 1, 12, tzinfo=timezone.utc), ends_at=datetime(2026, 1, 1, 13, tzinfo=timezone.utc), guest_name='Ana', guest_email='a@example.org', user=None)
@@ -65,13 +65,13 @@ def test_enqueue_is_transactional_and_increments_revision():
 
 
 
-def test_worker_creates_event_and_persists_identity():
+def test_worker_creates_event_and_persists_identity(postgres_test_db):
     import httpx
     from app.teams_sync import process_pending
 
-    engine = create_engine('sqlite://')
+    engine = postgres_test_db.engine
     Base.metadata.create_all(engine)
-    Session = sessionmaker(engine)
+    Session = postgres_test_db.session_factory
     with Session.begin() as db:
         seed_account(db)
     booking = SimpleNamespace(id=42, starts_at=datetime(2026, 1, 1, 12, tzinfo=timezone.utc), ends_at=datetime(2026, 1, 1, 13, tzinfo=timezone.utc), guest_name='Ana', guest_email='a@example.org', user=None)
@@ -92,12 +92,12 @@ def test_worker_creates_event_and_persists_identity():
 
 
 
-def test_failure_is_sanitized_and_delayed():
+def test_failure_is_sanitized_and_delayed(postgres_test_db):
     import httpx
     from app.teams_sync import process_pending
-    engine = create_engine('sqlite://')
+    engine = postgres_test_db.engine
     Base.metadata.create_all(engine)
-    Session = sessionmaker(engine)
+    Session = postgres_test_db.session_factory
     with Session.begin() as db:
         seed_account(db)
     booking = SimpleNamespace(id=10, starts_at=datetime(2026, 1, 1, 12, tzinfo=timezone.utc), ends_at=datetime(2026, 1, 1, 13, tzinfo=timezone.utc), guest_name='Ana', guest_email='a@example.org', user=None)
@@ -115,14 +115,14 @@ def test_failure_is_sanitized_and_delayed():
         assert job.lease_token is None
 
 
-def test_existing_event_without_url_recovers_using_get(monkeypatch):
+def test_existing_event_without_url_recovers_using_get(monkeypatch, postgres_test_db):
     import httpx
     from app import microsoft_graph as graph
     from app.teams_models import utcnow
     from app.teams_sync import process_pending
-    engine = create_engine("sqlite://")
+    engine = postgres_test_db.engine
     Base.metadata.create_all(engine)
-    Session = sessionmaker(engine)
+    Session = postgres_test_db.session_factory
     with Session.begin() as db:
         seed_account(db)
     booking = SimpleNamespace(id=51, starts_at=datetime(2026, 1, 1, 12, tzinfo=timezone.utc), ends_at=datetime(2026, 1, 1, 13, tzinfo=timezone.utc), guest_name="Ana", guest_email="a@example.org", user=None)

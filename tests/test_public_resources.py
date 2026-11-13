@@ -1,9 +1,7 @@
 import unittest
 from io import BytesIO
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
+from ephemeral_postgres import ephemeral_postgres
 from app import models
 from app.database import Base, get_db
 from app.database import ensure_public_resource_columns
@@ -13,9 +11,13 @@ from app.security import create_token
 
 class PublicResourcesTest(unittest.TestCase):
     def setUp(self):
-        self.engine = create_engine("sqlite+pysqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+        context = ephemeral_postgres()
+        database = context.__enter__()
+        self.addCleanup(context.__exit__, None, None, None)
+        self.engine = database.engine
+        self.assertEqual(self.engine.dialect.name, 'postgresql')
         Base.metadata.create_all(self.engine)
-        self.sessions = sessionmaker(bind=self.engine)
+        self.sessions = database.session_factory
         import tempfile
         self.temp_storage = tempfile.TemporaryDirectory()
         from app.storage import storage
@@ -116,10 +118,12 @@ class PublicResourcesTest(unittest.TestCase):
             self.assertIn(response.status_code, (401, 422))
 
     def test_legacy_public_resource_migration_is_additive_and_idempotent(self):
-        legacy = create_engine("sqlite+pysqlite:///:memory:")
+        context = ephemeral_postgres()
+        legacy = context.__enter__().engine
+        self.addCleanup(context.__exit__, None, None, None)
         try:
             with legacy.begin() as connection:
-                connection.exec_driver_sql("CREATE TABLE public_resources (id INTEGER PRIMARY KEY, kind VARCHAR(10) NOT NULL, title VARCHAR(180) NOT NULL, description TEXT NOT NULL, subject VARCHAR(120) NOT NULL, url VARCHAR(1000), storage_key VARCHAR(255), created_at DATETIME)")
+                connection.exec_driver_sql("CREATE TABLE public_resources (id INTEGER PRIMARY KEY, kind VARCHAR(10) NOT NULL, title VARCHAR(180) NOT NULL, description TEXT NOT NULL, subject VARCHAR(120) NOT NULL, url VARCHAR(1000), storage_key VARCHAR(255), created_at TIMESTAMP)")
                 connection.exec_driver_sql("INSERT INTO public_resources (id, kind, title, description, subject) VALUES (1, 'document', 'Old PDF', '', 'quimica')")
             ensure_public_resource_columns(legacy)
             ensure_public_resource_columns(legacy)

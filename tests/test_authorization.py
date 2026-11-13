@@ -14,9 +14,8 @@ viewer or file movement):
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
+
+from ephemeral_postgres import postgres_test_db
 
 from app import models
 from app.database import Base, get_db
@@ -27,16 +26,12 @@ ENGINE = None
 SESSIONS = None
 
 
-def _bootstrap(users):
-    """Create a fresh in-memory schema and seed `users` (list of User)."""
+def _bootstrap(users, database):
+    """Create a fresh PostgreSQL schema and seed `users` (list of User)."""
     global ENGINE, SESSIONS
-    ENGINE = create_engine(
-        "sqlite+pysqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
+    ENGINE = database.engine
     Base.metadata.create_all(ENGINE)
-    SESSIONS = sessionmaker(bind=ENGINE)
+    SESSIONS = database.session_factory
     with SESSIONS() as db:
         db.add_all(users)
         db.commit()
@@ -49,10 +44,10 @@ def _local_db():
 
 
 @pytest.fixture
-def client():
+def client(postgres_test_db):
     admin = models.User(name="Admin", email="admin@example.com", password_hash="x", role="admin")
     viewer = models.User(name="Viewer", email="viewer@example.com", password_hash="x", role="guest")
-    ids = _bootstrap([admin, viewer])
+    ids = _bootstrap([admin, viewer], postgres_test_db)
     app.dependency_overrides[get_db] = _local_db
     with TestClient(app) as c:
         yield {"client": c, "ids": ids}

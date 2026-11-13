@@ -1,14 +1,14 @@
-"""Real booking races. ISOLATED_POSTGRES_TEST_URL must point to a disposable DB."""
-import os
+"""Real booking races against a dedicated ephemeral PostgreSQL server."""
 import threading
 import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
-from uuid import uuid4
+
 
 from fastapi import HTTPException
-from sqlalchemy import create_engine, event, select, text
+from sqlalchemy import event, select, text
+from ephemeral_postgres import ephemeral_postgres
 from sqlalchemy.orm import sessionmaker
 
 from app import models, schemas
@@ -17,15 +17,13 @@ from app.main import (create_admin_class, request_booking, request_public_trial_
                       update_admin_class, update_booking_status)
 
 
-@unittest.skipUnless(os.getenv('ISOLATED_POSTGRES_TEST_URL'), 'requires disposable PostgreSQL')
 class RealBookingRaceTest(unittest.TestCase):
     def setUp(self):
-        url = os.environ['ISOLATED_POSTGRES_TEST_URL']
-        self.schema = 'race_' + uuid4().hex
-        self.control = create_engine(url, isolation_level='AUTOCOMMIT')
-        with self.control.connect() as conn:
-            conn.execute(text(f'CREATE SCHEMA {self.schema}'))
-        self.engine = create_engine(url, connect_args={'options': f'-csearch_path={self.schema}'})
+        context = ephemeral_postgres()
+        self.postgres = context.__enter__()
+        self.addCleanup(context.__exit__, None, None, None)
+        self.engine = self.postgres.engine
+        self.control = self.engine
         Base.metadata.create_all(self.engine)
         self.sessions = sessionmaker(bind=self.engine, autoflush=False)
         with self.sessions() as db:
@@ -39,9 +37,6 @@ class RealBookingRaceTest(unittest.TestCase):
 
     def tearDown(self):
         self.engine.dispose()
-        with self.control.connect() as conn:
-            conn.execute(text(f'DROP SCHEMA {self.schema} CASCADE'))
-        self.control.dispose()
 
     def race(self, first_operation, second_operation):
         reached, release, attempting = threading.Event(), threading.Event(), threading.Event()

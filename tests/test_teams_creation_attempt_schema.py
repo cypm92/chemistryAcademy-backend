@@ -1,16 +1,17 @@
-import os
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import inspect, text
 from sqlalchemy.exc import IntegrityError
+from ephemeral_postgres import postgres_test_db
 
 from app.database import ensure_application_schema
 from app.teams_models import TeamsCreationAttempt
 
 
-def test_fresh_attempt_schema_omits_unused_legacy_fields():
-    engine = create_engine('sqlite://')
+def test_fresh_attempt_schema_omits_unused_legacy_fields(postgres_test_db):
+    engine = postgres_test_db.engine
+    assert engine.dialect.name == 'postgresql'
     ensure_application_schema(engine)
     columns = {c['name'] for c in inspect(engine).get_columns('teams_creation_attempts')}
     assert not columns.intersection({'authorized_by_admin_id', 'authorization_reason', 'expected_revision',
@@ -18,8 +19,8 @@ def test_fresh_attempt_schema_omits_unused_legacy_fields():
     assert {'authorized_at', 'dispatched_at'} <= columns
 
 
-def test_legacy_attempt_columns_and_values_remain_untouched():
-    engine = create_engine('sqlite://')
+def test_legacy_attempt_columns_and_values_remain_untouched(postgres_test_db):
+    engine = postgres_test_db.engine
     TeamsCreationAttempt.__table__.create(engine)
     names = ('authorized_by_admin_id', 'authorization_reason', 'expected_revision',
              'prior_transaction_id', 'prior_event_id', 'prior_join_url')
@@ -36,30 +37,9 @@ def test_legacy_attempt_columns_and_values_remain_untouched():
         assert conn.execute(text('SELECT ' + ', '.join(names) + ' FROM teams_creation_attempts')).one() == ('evidence',) * 6
 
 
-@pytest.fixture(params=['sqlite', 'postgresql'])
-def attempt_engine(request, tmp_path):
-    admin = None
-    if request.param == 'sqlite':
-        engine = create_engine(f'sqlite:///{tmp_path / "attempts.sqlite"}')
-    else:
-        url = os.getenv('MICROSOFT_SCHEMA_TEST_POSTGRES_URL')
-        if not url:
-            pytest.skip('MICROSOFT_SCHEMA_TEST_POSTGRES_URL must be a disposable database')
-        if not url.startswith(('postgresql://', 'postgresql+psycopg2://')):
-            pytest.fail('PostgreSQL required')
-        admin = create_engine(url)
-        schema = 'attempt_test_' + uuid4().hex
-        with admin.begin() as conn:
-            conn.execute(text(f'CREATE SCHEMA "{schema}"'))
-        engine = create_engine(url, connect_args={'options': f'-csearch_path={schema}'})
-    try:
-        yield engine
-    finally:
-        engine.dispose()
-        if admin:
-            with admin.begin() as conn:
-                conn.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
-            admin.dispose()
+@pytest.fixture
+def attempt_engine(postgres_test_db):
+    return postgres_test_db.engine
 
 
 def test_attempt_constraints_and_index(attempt_engine):

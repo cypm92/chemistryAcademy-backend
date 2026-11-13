@@ -175,6 +175,12 @@ class MaterialOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class MaterialUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    title: str = Field(max_length=180)
+    tags: list[str]
+
+
 class MaterialMove(BaseModel):
     folder_id: int = Field(gt=0)
 

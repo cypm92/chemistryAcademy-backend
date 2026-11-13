@@ -1,5 +1,6 @@
 import pytest
 from sqlalchemy import select
+from ephemeral_postgres import postgres_test_db
 
 from app import models
 from app.security import create_token
@@ -32,22 +33,16 @@ def test_uncertain_creation_prevents_physical_delete(ctx, route, uncertain):
 
 
 @pytest.mark.parametrize('route', ['class', 'user'])
-def test_postgres_delete_waits_for_creation_marker(route):
-    import os
+def test_postgres_delete_waits_for_creation_marker(route, postgres_test_db):
     import threading
     import time
     from fastapi.testclient import TestClient
-    from sqlalchemy import create_engine, event, text
-    from sqlalchemy.engine import make_url
+    from sqlalchemy import event, text
     from sqlalchemy.orm import sessionmaker
     from app import main
     from app.database import Base, get_db
 
-    url = os.environ.get('TEAMS_DELETE_TEST_POSTGRES_URL')
-    if not url:
-        pytest.skip('TEAMS_DELETE_TEST_POSTGRES_URL must name a disposable database')
-    assert make_url(url).database == 'teams_delete_disposable'
-    engine = create_engine(url)
+    engine = postgres_test_db.engine
     Base.metadata.create_all(engine)
     sessions = sessionmaker(bind=engine)
     entered = threading.Event()
@@ -101,5 +96,4 @@ def test_postgres_delete_waits_for_creation_marker(route):
         if client is not None:
             client.close()
         main.app.dependency_overrides.clear()
-        Base.metadata.drop_all(engine)
         engine.dispose()

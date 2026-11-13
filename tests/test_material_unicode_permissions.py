@@ -3,9 +3,8 @@ from urllib.parse import unquote
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
+
+from ephemeral_postgres import postgres_test_db
 
 from app import models
 from app.database import Base, get_db
@@ -15,10 +14,10 @@ from app.storage import storage
 
 
 @pytest.fixture
-def material_env(tmp_path, monkeypatch):
-    engine = create_engine("sqlite+pysqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+def material_env(tmp_path, monkeypatch, postgres_test_db):
+    engine = postgres_test_db.engine
     Base.metadata.create_all(engine)
-    sessions = sessionmaker(bind=engine)
+    sessions = postgres_test_db.session_factory
     with sessions() as db:
         users = [models.User(name=role, email=f"{role}@example.com", password_hash="x", role="admin" if role == "admin" else "guest") for role in ("admin", "reader", "downloader", "expired", "stranger")]
         folder = models.Folder(name="Materials")

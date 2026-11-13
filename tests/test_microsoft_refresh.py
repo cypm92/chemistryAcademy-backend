@@ -1,10 +1,9 @@
 import httpx
-import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
 import pytest
 from cryptography.fernet import Fernet
-from sqlalchemy import create_engine
+from ephemeral_postgres import postgres_test_db
 from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
@@ -13,8 +12,8 @@ from app.microsoft_oauth_routes import Config, SCOPES
 
 
 @pytest.fixture
-def setup_refresh(tmp_path):
-    engine = create_engine('sqlite:///' + str(tmp_path / 'credentials.db'))
+def setup_refresh(postgres_test_db):
+    engine = postgres_test_db.engine
     Base.metadata.create_all(engine, tables=[MicrosoftCredential.__table__])
     factory = sessionmaker(engine)
     key = Fernet.generate_key().decode()
@@ -25,10 +24,10 @@ def setup_refresh(tmp_path):
     engine.dispose()
 
 
-def test_refresh_rotates_encrypted_token():
+def test_refresh_rotates_encrypted_token(postgres_test_db):
     from app.microsoft_refresh import get_access_token
 
-    engine = create_engine('sqlite://')
+    engine = postgres_test_db.engine
     Base.metadata.create_all(engine, tables=[MicrosoftCredential.__table__])
     factory = sessionmaker(engine)
     key = Fernet.generate_key().decode()
@@ -113,11 +112,10 @@ def test_timeout_and_redirects_are_explicit_and_error_is_sanitized(setup_refresh
         assert 'old-token' not in str(exc.value)
 
 
-@pytest.mark.skipif(not os.getenv('ISOLATED_POSTGRES_TEST_URL'), reason='requires disposable PostgreSQL')
-def test_postgres_refresh_serializes_and_disconnect_wins():
+def test_postgres_refresh_serializes_and_disconnect_wins(postgres_test_db):
     from sqlalchemy import delete
     from app.microsoft_refresh import get_access_token
-    engine = create_engine(os.environ['ISOLATED_POSTGRES_TEST_URL'])
+    engine = postgres_test_db.engine
     Base.metadata.create_all(engine, tables=[MicrosoftCredential.__table__])
     factory = sessionmaker(engine)
     key = Fernet.generate_key().decode()
@@ -157,12 +155,11 @@ def test_postgres_refresh_serializes_and_disconnect_wins():
         engine.dispose()
 
 
-@pytest.mark.skipif(not os.getenv('ISOLATED_POSTGRES_TEST_URL'), reason='requires disposable PostgreSQL')
-def test_postgres_two_refreshes_consume_rotated_token_in_order():
+def test_postgres_two_refreshes_consume_rotated_token_in_order(postgres_test_db):
     from urllib.parse import parse_qs
     from sqlalchemy import delete
     from app.microsoft_refresh import get_access_token
-    engine = create_engine(os.environ['ISOLATED_POSTGRES_TEST_URL'])
+    engine = postgres_test_db.engine
     Base.metadata.create_all(engine, tables=[MicrosoftCredential.__table__])
     factory = sessionmaker(engine)
     key = Fernet.generate_key().decode()
@@ -202,12 +199,11 @@ def test_postgres_two_refreshes_consume_rotated_token_in_order():
         engine.dispose()
 
 
-@pytest.mark.skipif(not os.getenv('ISOLATED_POSTGRES_TEST_URL'), reason='requires disposable PostgreSQL')
 @pytest.mark.parametrize('stale_response', [(200, {'access_token': 'wrong-account', 'refresh_token': 'stale'}), (400, {'error': 'invalid_grant'})])
-def test_postgres_reconnect_wins_over_inflight_refresh(stale_response):
+def test_postgres_reconnect_wins_over_inflight_refresh(stale_response, postgres_test_db):
     from sqlalchemy import delete
     from app.microsoft_refresh import get_access_token, MicrosoftRefreshError
-    engine = create_engine(os.environ['ISOLATED_POSTGRES_TEST_URL'])
+    engine = postgres_test_db.engine
     Base.metadata.create_all(engine, tables=[MicrosoftCredential.__table__])
     factory = sessionmaker(engine)
     key = Fernet.generate_key().decode()
@@ -248,12 +244,11 @@ def test_postgres_reconnect_wins_over_inflight_refresh(stale_response):
         engine.dispose()
 
 
-@pytest.mark.skipif(not os.getenv('ISOLATED_POSTGRES_TEST_URL'), reason='requires disposable PostgreSQL')
-def test_postgres_expired_lease_fences_stale_worker():
+def test_postgres_expired_lease_fences_stale_worker(postgres_test_db):
     from datetime import datetime, timedelta, timezone
     from sqlalchemy import delete
     from app.microsoft_refresh import get_access_token, MicrosoftRefreshError
-    engine = create_engine(os.environ['ISOLATED_POSTGRES_TEST_URL'])
+    engine = postgres_test_db.engine
     Base.metadata.create_all(engine, tables=[MicrosoftCredential.__table__])
     factory = sessionmaker(engine)
     key = Fernet.generate_key().decode()

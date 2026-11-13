@@ -1,19 +1,20 @@
 """Legacy orphan evidence must survive the transition to creation attempts."""
 import pytest
-from sqlalchemy import create_engine, text, select
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy import text, select
+from ephemeral_postgres import postgres_test_db
 
 from app.database import Base, ensure_application_schema
 from app.teams_models import TeamsCreationAttempt, TeamsSyncJob
 
 
-def test_matched_legacy_orphan_requires_manual_review_without_mutation():
-    engine = create_engine('sqlite://')
+def test_matched_legacy_orphan_requires_manual_review_without_mutation(postgres_test_db):
+    engine = postgres_test_db.engine
+    assert engine.dialect.name == 'postgresql'
     Base.metadata.create_all(engine)
     with engine.begin() as conn:
         conn.execute(text('DROP TABLE IF EXISTS teams_orphan_events'))
         conn.execute(text('CREATE TABLE teams_orphan_events (id INTEGER PRIMARY KEY, job_id INTEGER NOT NULL, event_id TEXT NOT NULL, completed_at TIMESTAMP)'))
-    sessions = sessionmaker(engine)
+    sessions = postgres_test_db.session_factory
     with sessions.begin() as db:
         job = TeamsSyncJob(booking_key='legacy-test', desired='upsert', transaction_id='legacy-job', revision=1)
         db.add(job)
@@ -30,13 +31,13 @@ def test_matched_legacy_orphan_requires_manual_review_without_mutation():
 
 
 
-def test_unmatched_legacy_orphan_fails_closed_without_inventing_attempt():
-    engine = create_engine('sqlite://')
+def test_unmatched_legacy_orphan_fails_closed_without_inventing_attempt(postgres_test_db):
+    engine = postgres_test_db.engine
     Base.metadata.create_all(engine)
     with engine.begin() as conn:
         conn.execute(text('DROP TABLE IF EXISTS teams_orphan_events'))
         conn.execute(text('CREATE TABLE teams_orphan_events (id INTEGER PRIMARY KEY, job_id INTEGER NOT NULL, event_id TEXT NOT NULL, completed_at TIMESTAMP)'))
-    sessions = sessionmaker(engine)
+    sessions = postgres_test_db.session_factory
     with sessions.begin() as db:
         job = TeamsSyncJob(booking_key='unmatched', desired='upsert', transaction_id='real-job', revision=1)
         db.add(job); db.flush()

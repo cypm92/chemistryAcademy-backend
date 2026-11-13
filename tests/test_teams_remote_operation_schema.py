@@ -1,39 +1,18 @@
-import os
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import inspect, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.database import ensure_application_schema
 from app import teams_models
+from ephemeral_postgres import postgres_test_db
 
 
-@pytest.fixture(params=['sqlite', 'postgresql'])
-def db(request, tmp_path):
-    admin = None
-    if request.param == 'sqlite':
-        engine = create_engine(f'sqlite:///{tmp_path / "remote.sqlite"}')
-    else:
-        url = os.getenv('MICROSOFT_SCHEMA_TEST_POSTGRES_URL')
-        if not url:
-            pytest.skip('MICROSOFT_SCHEMA_TEST_POSTGRES_URL must be a disposable database')
-        if not url.startswith(('postgresql://', 'postgresql+psycopg2://')):
-            pytest.fail('PostgreSQL required')
-        admin = create_engine(url)
-        schema = 'remote_test_' + uuid4().hex
-        with admin.begin() as conn:
-            conn.execute(text(f'CREATE SCHEMA "{schema}"'))
-        engine = create_engine(url, connect_args={'options': f'-csearch_path={schema}'})
-    try:
-        yield engine
-    finally:
-        engine.dispose()
-        if admin:
-            with admin.begin() as conn:
-                conn.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
-            admin.dispose()
+@pytest.fixture
+def db(postgres_test_db):
+    return postgres_test_db.engine
 
 
 def test_legacy_migration_preserves_multiple_operations(db):

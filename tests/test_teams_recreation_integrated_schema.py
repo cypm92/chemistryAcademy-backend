@@ -1,11 +1,13 @@
-from sqlalchemy import create_engine, inspect
+from sqlalchemy import inspect
+from ephemeral_postgres import postgres_test_db
 
 from app.database import Base
 import app.teams_models  # register models
 
 
-def test_recreation_authorization_is_on_job_not_separate_table():
-    engine = create_engine('sqlite://')
+def test_recreation_authorization_is_on_job_not_separate_table(postgres_test_db):
+    engine = postgres_test_db.engine
+    assert engine.dialect.name == 'postgresql'
     Base.metadata.create_all(engine)
     inspector = inspect(engine)
     assert 'teams_recreation_decisions' not in inspector.get_table_names()
@@ -14,10 +16,10 @@ def test_recreation_authorization_is_on_job_not_separate_table():
             'recreation_reason', 'recreation_tenant_id', 'recreation_account_id'} <= columns
 
 
-def test_legacy_authorization_is_preserved_but_never_imported():
+def test_legacy_authorization_is_preserved_but_never_imported(postgres_test_db):
     from sqlalchemy import text
     from app.database import ensure_application_schema
-    engine = create_engine('sqlite://')
+    engine = postgres_test_db.engine
     with engine.begin() as db:
         db.execute(text("CREATE TABLE teams_sync_jobs (id INTEGER PRIMARY KEY, revision INTEGER NOT NULL, transaction_id VARCHAR(36) NOT NULL, event_id TEXT, creation_in_flight BOOLEAN NOT NULL, last_error VARCHAR(200))"))
         db.execute(text("CREATE TABLE teams_recreation_decisions (id INTEGER PRIMARY KEY, job_id INTEGER, replacement_transaction_id VARCHAR(36))"))

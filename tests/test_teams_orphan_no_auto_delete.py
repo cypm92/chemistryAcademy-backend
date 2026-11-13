@@ -2,20 +2,21 @@ from teams_identity_fixtures import IDENTITY, seed_account, seed_identified_even
 from datetime import datetime, timedelta, timezone
 
 import httpx
-from sqlalchemy import create_engine, select, text
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy import select, text
+from ephemeral_postgres import postgres_test_db
 
 from app import models, teams_sync, microsoft_graph as graph
 from app.database import Base
 from app.teams_models import TeamsSyncJob
 
 
-def test_legacy_orphan_is_not_deleted_automatically(monkeypatch):
-    engine = create_engine('sqlite://')
+def test_legacy_orphan_is_not_deleted_automatically(monkeypatch, postgres_test_db):
+    engine = postgres_test_db.engine
+    assert engine.dialect.name == 'postgresql'
     Base.metadata.create_all(engine)
     with engine.begin() as conn:
         conn.execute(text("CREATE TABLE teams_orphan_events (id INTEGER PRIMARY KEY, job_id INTEGER, event_id TEXT, state TEXT, completed_at TIMESTAMP)"))
-    sessions = sessionmaker(engine)
+    sessions = postgres_test_db.session_factory
     with sessions.begin() as db:
         job = TeamsSyncJob(booking_key='legacy', revision=1, desired='upsert',
                            transaction_id='transaction', applied_revision=1)
@@ -31,10 +32,10 @@ def test_legacy_orphan_is_not_deleted_automatically(monkeypatch):
     assert deleted == []
 
 
-def test_late_creation_preserves_manual_selection_and_records_review(monkeypatch):
-    engine = create_engine("sqlite://")
+def test_late_creation_preserves_manual_selection_and_records_review(monkeypatch, postgres_test_db):
+    engine = postgres_test_db.engine
     Base.metadata.create_all(engine)
-    sessions = sessionmaker(engine)
+    sessions = postgres_test_db.session_factory
     start = datetime(2026, 1, 1, tzinfo=timezone.utc)
     with sessions.begin() as db:
         seed_account(db)

@@ -1,18 +1,22 @@
-import os
 import threading
 import unittest
 from datetime import datetime, timedelta, timezone
+from ephemeral_postgres import ephemeral_postgres
 
 
-@unittest.skipUnless(os.getenv('TEST_REPORT_DATABASE_URL'), 'disposable PostgreSQL not configured')
 class PostgresReportRaceTest(unittest.TestCase):
+    def setUp(self):
+        context = ephemeral_postgres()
+        self.postgres = context.__enter__()
+        self.addCleanup(context.__exit__, None, None, None)
+
     def test_concurrent_workers_insert_one_snapshot(self):
-        from sqlalchemy import create_engine, select
+        from sqlalchemy import select
         from sqlalchemy.orm import sessionmaker
         from app.database import Base
         from app.models import Booking, NotificationEvent
         from app.admin_reports import enqueue_due_reports
-        engine = create_engine(os.environ['TEST_REPORT_DATABASE_URL'])
+        engine = self.postgres.engine
         Base.metadata.create_all(engine)
         sessions = sessionmaker(bind=engine)
         now = datetime(2026, 5, 5, 8, tzinfo=timezone.utc)

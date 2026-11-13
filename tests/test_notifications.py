@@ -5,9 +5,9 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
-from sqlalchemy import create_engine, inspect, select, text
+from sqlalchemy import inspect, select, text
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
+from ephemeral_postgres import ephemeral_postgres
 
 from app import models, schemas
 from app.database import Base, get_db
@@ -17,7 +17,11 @@ from app.security import create_token
 
 class NotificationSettingsTest(unittest.TestCase):
     def setUp(self):
-        self.engine = create_engine("sqlite+pysqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+        context = ephemeral_postgres()
+        database = context.__enter__()
+        self.addCleanup(context.__exit__, None, None, None)
+        self.engine = database.engine
+        self.assertEqual(self.engine.dialect.name, 'postgresql')
         Base.metadata.create_all(self.engine)
         self.sessions = sessionmaker(bind=self.engine)
 
@@ -58,9 +62,11 @@ class NotificationSettingsTest(unittest.TestCase):
 
     def test_legacy_notification_table_gets_lease_column(self):
         from app.database import ensure_notification_lease_column
-        legacy_engine = create_engine("sqlite:///:memory:")
+        context = ephemeral_postgres()
+        legacy_engine = context.__enter__().engine
+        self.addCleanup(context.__exit__, None, None, None)
         with legacy_engine.begin() as connection:
-            connection.execute(text("CREATE TABLE notification_events (id INTEGER PRIMARY KEY, logical_key VARCHAR(255), recipient VARCHAR(255), subject VARCHAR(255), body TEXT, status VARCHAR(20), attempts INTEGER, available_at DATETIME, sent_at DATETIME, last_error TEXT)"))
+            connection.execute(text("CREATE TABLE notification_events (id INTEGER PRIMARY KEY, logical_key VARCHAR(255), recipient VARCHAR(255), subject VARCHAR(255), body TEXT, status VARCHAR(20), attempts INTEGER, available_at TIMESTAMP, sent_at TIMESTAMP, last_error TEXT)"))
         with patch("app.database.engine", legacy_engine):
             ensure_notification_lease_column()
         columns = {column["name"] for column in inspect(legacy_engine).get_columns("notification_events")}

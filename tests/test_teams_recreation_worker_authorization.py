@@ -4,8 +4,8 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
-from sqlalchemy import create_engine, select
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy import select
+from ephemeral_postgres import postgres_test_db
 
 from app import models, teams_sync
 from app.database import Base
@@ -17,10 +17,10 @@ NEW = '22222222-2222-4222-8222-222222222222'
 OTHER = '33333333-3333-4333-8333-333333333333'
 
 
-def setup_job():
-    engine = create_engine('sqlite://')
+def setup_job(postgres_test_db):
+    engine = postgres_test_db.engine
     Base.metadata.create_all(engine)
-    sessions = sessionmaker(engine)
+    sessions = postgres_test_db.session_factory
     start = datetime(2026, 1, 1, tzinfo=timezone.utc)
     booking = SimpleNamespace(id=912, starts_at=start, ends_at=start + timedelta(hours=1),
                               guest_name='Ana', guest_email='a@example.org', user=None)
@@ -57,8 +57,8 @@ def decision(job_id, transaction=NEW):
     ('exact', 'upsert', 1), ('none', 'upsert', 0), ('other_job', 'upsert', 0),
     ('other_transaction', 'upsert', 0), ('exact', 'delete', 0),
 ])
-def test_only_exact_authorization_allows_recreation_with_orphan(authorization, desired, expected):
-    sessions = setup_job()
+def test_only_exact_authorization_allows_recreation_with_orphan(authorization, desired, expected, postgres_test_db):
+    sessions = setup_job(postgres_test_db)
     with sessions.begin() as db:
         job = db.scalar(select(TeamsSyncJob))
         job.desired = desired
@@ -87,8 +87,8 @@ def test_only_exact_authorization_allows_recreation_with_orphan(authorization, d
         assert job.event_id == ('new-event' if expected else None)
 
 
-def test_incomplete_authorization_cannot_send():
-    sessions = setup_job()
+def test_incomplete_authorization_cannot_send(postgres_test_db):
+    sessions = setup_job(postgres_test_db)
     with sessions.begin() as db:
         job = db.scalar(select(TeamsSyncJob))
         authorize(job)
@@ -99,8 +99,8 @@ def test_incomplete_authorization_cannot_send():
     assert calls == []
 
 
-def test_late_old_reply_records_review_without_touching_new_lease():
-    sessions = setup_job()
+def test_late_old_reply_records_review_without_touching_new_lease(postgres_test_db):
+    sessions = setup_job(postgres_test_db)
     with sessions.begin() as db:
         job = db.scalar(select(TeamsSyncJob))
         job.transaction_id = OLD
@@ -122,7 +122,7 @@ def test_late_old_reply_records_review_without_touching_new_lease():
     with sessions() as db:
         job = db.scalar(select(TeamsSyncJob))
         assert (job.transaction_id, job.event_id, job.join_url, job.lease_token, job.creation_in_flight) == (NEW, 'selected-event', 'selected-url', 'new-lease', True)
-        assert job.lease_expires_at == datetime(2030, 1, 1)
+        assert job.lease_expires_at == datetime(2030, 1, 1, tzinfo=timezone.utc)
         attempt = db.scalar(select(TeamsCreationAttempt).where(TeamsCreationAttempt.transaction_id == OLD))
         assert (attempt.transaction_id, attempt.state, attempt.event_id) == (OLD, 'identified', 'late-old-event')
         assert attempt.needs_review

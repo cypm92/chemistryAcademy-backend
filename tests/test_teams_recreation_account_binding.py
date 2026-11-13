@@ -1,5 +1,6 @@
 import httpx
 from sqlalchemy import select
+from ephemeral_postgres import postgres_test_db
 
 from app import teams_sync
 from app.teams_models import TeamsSyncJob
@@ -9,8 +10,8 @@ from app.microsoft_auth_models import MicrosoftOAuthGeneration
 from app.microsoft_refresh import MicrosoftAccessTokenIdentity
 
 
-def test_legacy_recreation_authorization_cannot_post():
-    sessions = setup_job()
+def test_legacy_recreation_authorization_cannot_post(postgres_test_db):
+    sessions = setup_job(postgres_test_db)
     with sessions.begin() as db:
         job = db.scalar(select(TeamsSyncJob))
         legacy = decision(job.id)
@@ -24,8 +25,8 @@ def test_legacy_recreation_authorization_cannot_post():
         assert db.scalar(select(TeamsSyncJob)).event_id is None
 
 
-def test_same_account_reconnect_uses_new_generation():
-    sessions = setup_job()
+def test_same_account_reconnect_uses_new_generation(postgres_test_db):
+    sessions = setup_job(postgres_test_db)
     with sessions.begin() as db:
         job = db.scalar(select(TeamsSyncJob))
         authorize(job)
@@ -37,8 +38,8 @@ def test_same_account_reconnect_uses_new_generation():
     assert [r.method for r in calls] == ['POST']
 
 
-def test_generation_change_during_token_acquisition_fences_post():
-    sessions = setup_job()
+def test_generation_change_during_token_acquisition_fences_post(postgres_test_db):
+    sessions = setup_job(postgres_test_db)
     with sessions.begin() as db:
         job = db.scalar(select(TeamsSyncJob))
         authorize(job)
@@ -52,14 +53,14 @@ def test_generation_change_during_token_acquisition_fences_post():
     assert calls == []
 
 
-def test_upgrade_adds_identity_without_inventing_legacy_owner():
-    from sqlalchemy import create_engine, inspect, text
+def test_upgrade_adds_identity_without_inventing_legacy_owner(postgres_test_db):
+    from sqlalchemy import inspect, text
     from app.database import _upgrade_microsoft_schema
-    engine = create_engine('sqlite://')
+    engine = postgres_test_db.engine
     with engine.begin() as db:
         db.execute(text('CREATE TABLE teams_recreation_decisions (id INTEGER PRIMARY KEY)'))
         db.execute(text('INSERT INTO teams_recreation_decisions (id) VALUES (1)'))
-        _upgrade_microsoft_schema(db, 'sqlite')
-        _upgrade_microsoft_schema(db, 'sqlite')
+        _upgrade_microsoft_schema(db, 'postgresql')
+        _upgrade_microsoft_schema(db, 'postgresql')
         assert db.execute(text('SELECT id FROM teams_recreation_decisions')).one() == (1,)
         assert {c['name'] for c in inspect(db).get_columns('teams_recreation_decisions')} == {'id'}

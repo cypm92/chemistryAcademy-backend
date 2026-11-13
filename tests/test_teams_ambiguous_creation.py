@@ -5,8 +5,8 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import httpx
-from sqlalchemy import create_engine, select
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy import select
+from ephemeral_postgres import postgres_test_db
 
 from app.database import Base
 from app import models  # register booking table
@@ -14,10 +14,11 @@ from app.teams_models import TeamsSyncJob
 from app.teams_sync import enqueue_booking, process_pending
 
 
-def test_cancel_after_accepted_post_with_lost_response_cleans_remote_event():
-    engine = create_engine('sqlite://')
+def test_cancel_after_accepted_post_with_lost_response_cleans_remote_event(postgres_test_db):
+    engine = postgres_test_db.engine
+    assert engine.dialect.name == 'postgresql'
     Base.metadata.create_all(engine)
-    sessions = sessionmaker(engine)
+    sessions = postgres_test_db.session_factory
     booking = SimpleNamespace(id=912, starts_at=datetime(2026, 1, 1, 12, tzinfo=timezone.utc),
                               ends_at=datetime(2026, 1, 1, 13, tzinfo=timezone.utc),
                               guest_name='Ana', guest_email='a@example.org', user=None)

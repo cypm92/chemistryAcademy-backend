@@ -2,9 +2,8 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, select
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
+from sqlalchemy import select
+from ephemeral_postgres import postgres_test_db
 
 from app import models, microsoft_oauth_routes
 from app.database import Base, get_db
@@ -14,11 +13,12 @@ from app.teams_models import TeamsSyncJob
 
 
 @pytest.fixture
-def context(monkeypatch):
+def context(monkeypatch, postgres_test_db):
     monkeypatch.setattr(microsoft_oauth_routes, 'get_config', lambda: None)
-    engine = create_engine('sqlite://', connect_args={'check_same_thread': False}, poolclass=StaticPool)
+    engine = postgres_test_db.engine
+    assert engine.dialect.name == 'postgresql'
     Base.metadata.create_all(engine)
-    sessions = sessionmaker(bind=engine)
+    sessions = postgres_test_db.session_factory
     with sessions.begin() as db:
         users = [models.User(name=x, email=x+'@example.com', password_hash='x', role='admin' if x == 'admin' else 'student') for x in ('admin', 'student', 'other')]
         db.add_all(users); db.flush()

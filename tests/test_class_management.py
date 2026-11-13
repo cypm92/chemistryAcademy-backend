@@ -3,9 +3,9 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, inspect, text
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
+from sqlalchemy import inspect, text
+
+from ephemeral_postgres import ephemeral_postgres
 
 from app import models
 from app.database import Base, get_db
@@ -15,9 +15,12 @@ from app.security import create_token
 
 class ClassManagementTest(unittest.TestCase):
     def setUp(self):
-        self.engine = create_engine('sqlite://', connect_args={'check_same_thread': False}, poolclass=StaticPool)
+        self.postgres = ephemeral_postgres()
+        database = self.postgres.__enter__()
+        self.addCleanup(self.postgres.__exit__, None, None, None)
+        self.engine = database.engine
         Base.metadata.create_all(self.engine)
-        self.sessions = sessionmaker(bind=self.engine)
+        self.sessions = database.session_factory
         def test_db():
             with self.sessions() as db:
                 yield db
@@ -199,10 +202,13 @@ class LegacyManagementMigrationTest(unittest.TestCase):
 
     def test_existing_bookings_are_preserved_and_migration_is_idempotent(self):
         from app.database import ensure_booking_management_column
-        engine = create_engine("sqlite://")
+        postgres = ephemeral_postgres()
+        database = postgres.__enter__()
+        self.addCleanup(postgres.__exit__, None, None, None)
+        engine = database.engine
         with engine.begin() as connection:
             connection.execute(text("CREATE TABLE bookings (id INTEGER PRIMARY KEY, status VARCHAR(20))"))
-            connection.execute(text("INSERT INTO bookings (id, status) VALUES (1, \"confirmed\")"))
+            connection.execute(text("INSERT INTO bookings (id, status) VALUES (1, :status)"), {"status": "confirmed"})
         ensure_booking_management_column(engine)
         ensure_booking_management_column(engine)
         self.assertIn("management_status", {c["name"] for c in inspect(engine).get_columns("bookings")})
