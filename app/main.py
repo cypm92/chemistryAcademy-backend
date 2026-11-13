@@ -10,7 +10,7 @@ from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadF
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from sqlalchemy import delete, inspect, select, text
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from . import models, schemas
 from . import microsoft_oauth_routes
@@ -1279,6 +1279,27 @@ def active_material_grant(material_id: int, user_id: int, now: datetime, db: Ses
     return direct or tag_grant
 
 
+@app.get("/admin/users/{user_id}/material-access", response_model=list[schemas.SharingByMaterialOut])
+def user_material_access(user_id: int, _: models.User = Depends(admin_user), db: Session = Depends(get_db)):
+    if not db.get(models.User, user_id):
+        raise HTTPException(404, "Usuario no encontrado")
+    now = datetime.now(timezone.utc)
+    direct = db.scalars(select(models.AccessGrant).options(joinedload(models.AccessGrant.material)).where(
+        models.AccessGrant.user_id == user_id).order_by(models.AccessGrant.expires_at, models.AccessGrant.id)).all()
+    result = {grant.material_id: {'material': grant.material, 'direct': grant, 'tags': []} for grant in direct}
+    rows = db.execute(select(models.Material, models.Tag).join(
+        models.MaterialTag, models.MaterialTag.material_id == models.Material.id,
+    ).join(models.Tag, models.Tag.id == models.MaterialTag.tag_id).join(
+        models.TagAccessGrant, models.TagAccessGrant.tag_id == models.Tag.id,
+    ).where(models.Material.is_class_attachment.is_(False), models.TagAccessGrant.user_id == user_id,
+        models.TagAccessGrant.starts_at <= now, models.TagAccessGrant.expires_at > now,
+    ).order_by(models.Material.id, models.Tag.id)).all()
+    for material, tag in rows:
+        row = result.setdefault(material.id, {'material': material, 'direct': None, 'tags': []})
+        row['tags'].append(tag)
+    return list(result.values())
+
+
 @app.get("/admin/users/{user_id}/grants", response_model=list[schemas.GrantWithMaterialOut])
 def user_grants(user_id: int, _: models.User = Depends(admin_user), db: Session = Depends(get_db)):
     if not db.get(models.User, user_id):
@@ -1368,17 +1389,31 @@ def all_materials(user: models.User = Depends(admin_user), db: Session = Depends
     now = datetime.now(timezone.utc)
     materials = list(db.scalars(select(models.Material).where(models.Material.is_class_attachment.is_(False)).order_by(models.Material.created_at.desc())))
     favorite_ids = set(db.scalars(select(models.MaterialFavorite.material_id).where(models.MaterialFavorite.user_id == user.id)))
+    direct = db.scalars(select(models.AccessGrant).options(joinedload(models.AccessGrant.user)).where(
+        models.AccessGrant.starts_at <= now, models.AccessGrant.expires_at > now,
+    ).order_by(models.AccessGrant.expires_at, models.AccessGrant.id)).all()
+    grants_by_material = {}
+    sharing_by_material = {}
+    for grant in direct:
+        grants_by_material.setdefault(grant.material_id, []).append(grant)
+        sharing_by_material.setdefault(grant.material_id, {})[grant.user_id] = {'user': grant.user, 'direct': grant, 'tags': []}
+    tag_rows = db.execute(select(models.MaterialTag.material_id, models.TagAccessGrant, models.Tag).join(
+        models.Tag, models.Tag.id == models.MaterialTag.tag_id,
+    ).join(models.TagAccessGrant, models.TagAccessGrant.tag_id == models.Tag.id).options(
+        joinedload(models.TagAccessGrant.user),
+    ).where(models.TagAccessGrant.starts_at <= now, models.TagAccessGrant.expires_at > now,
+    ).order_by(models.MaterialTag.material_id, models.Tag.id)).all()
+    for material_id, grant, tag in tag_rows:
+        sharing = sharing_by_material.setdefault(material_id, {})
+        entry = sharing.setdefault(grant.user_id, {'user': grant.user, 'direct': None, 'tags': []})
+        entry['tags'].append(tag)
     result = []
     for material in materials:
-        grants = list(db.scalars(select(models.AccessGrant).where(
-            models.AccessGrant.material_id == material.id,
-            models.AccessGrant.starts_at <= now,
-            models.AccessGrant.expires_at > now,
-        ).order_by(models.AccessGrant.expires_at)))
         result.append({
             **material_data(material),
             "is_favorite": material.id in favorite_ids,
-            "grants": grants,
+            "grants": grants_by_material.get(material.id, []),
+            "sharing": list(sharing_by_material.get(material.id, {}).values()),
         })
     return result
 
@@ -1405,6 +1440,15 @@ def remove_favorite(material_id: int, user: models.User = Depends(current_user),
 @app.get("/admin/tags", response_model=list[schemas.TagOut])
 def all_tags(_: models.User = Depends(admin_user), db: Session = Depends(get_db)):
     return list(db.scalars(select(models.Tag).order_by(models.Tag.name)))
+
+
+@app.delete("/admin/tags/{tag_id}", status_code=204)
+def delete_tag(tag_id: int, _: models.User = Depends(admin_user), db: Session = Depends(get_db)):
+    tag = db.get(models.Tag, tag_id)
+    if not tag:
+        raise HTTPException(404, "Etiqueta no encontrada")
+    db.delete(tag)
+    db.commit()
 
 
 @app.post("/admin/materials", response_model=schemas.MaterialOut, status_code=201)
