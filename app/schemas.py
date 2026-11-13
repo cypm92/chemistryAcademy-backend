@@ -106,6 +106,18 @@ class GrantWithMaterialOut(GrantOut):
     material: SharedMaterialOut
 
 
+class SharingByUserOut(BaseModel):
+    user: UserOut
+    direct: GrantOut | None = None
+    tags: list[TagOut] = []
+
+
+class SharingByMaterialOut(BaseModel):
+    material: SharedMaterialOut
+    direct: GrantOut | None = None
+    tags: list[TagOut] = []
+
+
 class FolderCreate(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     parent_id: int | None = None
@@ -187,6 +199,7 @@ class MaterialMove(BaseModel):
 
 class AdminMaterialOut(MaterialOut):
     grants: list[GrantWithUserOut] = []
+    sharing: list[SharingByUserOut] = []
 
 
 class BookingCreate(BaseModel):
