@@ -80,6 +80,148 @@ def visible(s, user):
     return {item['id'] for item in response.json()}
 
 
+def test_admin_sharing_includes_direct_and_tag_access_once(setup):
+    client, sessions, _, ids = setup
+    with sessions.begin() as db:
+        now = datetime.now(timezone.utc)
+        db.add(models.AccessGrant(user_id=ids['old_user'], material_id=ids['material'],
+            starts_at=now-timedelta(days=1), expires_at=now+timedelta(days=1)))
+    response = client.get('/admin/materials', headers=auth(ids['admin']))
+    assert response.status_code == 200
+    material = next(row for row in response.json() if row['id'] == ids['material'])
+    sharing = material['sharing']
+    old = [row for row in sharing if row['user']['id'] == ids['old_user']]
+    assert len(old) == 1
+    assert old[0]['direct'] is not None
+    assert [tag['name'] for tag in old[0]['tags']] == ['OLD']
+    response = client.get(f"/admin/users/{ids['old_user']}/material-access", headers=auth(ids['admin']))
+    assert response.status_code == 200
+    rows = [row for row in response.json() if row['material']['id'] == ids['material']]
+    assert len(rows) == 1
+    assert rows[0]['direct'] is not None
+    assert [tag['name'] for tag in rows[0]['tags']] == ['OLD']
+
+
+def test_admin_access_queries_do_not_grow_per_material(setup):
+    client, sessions, engine, ids = setup
+    with sessions.begin() as db:
+        for i in range(12):
+            db.add(models.Material(title=f'Extra {i}', kind='pdf', filename=f'extra-{i}.pdf',
+                storage_key=f'extra-{i}.pdf', content_type='application/pdf', size_bytes=1))
+    statements = []
+    def record(_conn, _cursor, statement, _parameters, _context, _many):
+        text = statement.lower()
+        if text.lstrip().startswith('select') and ('access_grants' in text or 'tag_access_grants' in text):
+            statements.append(text)
+    event.listen(engine, 'before_cursor_execute', record)
+    try:
+        for path in (f"/admin/users/{ids['old_user']}/material-access", '/admin/materials'):
+            statements.clear()
+            response = client.get(path, headers=auth(ids['admin']))
+            assert response.status_code == 200, response.text
+            assert len(statements) <= 4, (path, len(statements))
+    finally:
+        event.remove(engine, 'before_cursor_execute', record)
+
+
+def test_student_material_access_keeps_direct_grants_ordered_by_expiry(setup):
+    client, sessions, _, ids = setup
+    now = datetime.now(timezone.utc)
+    with sessions.begin() as db:
+        db.get(models.AccessGrant, ids['direct']).expires_at = now + timedelta(days=5)
+        db.add(models.AccessGrant(user_id=ids['direct_user'], material_id=ids['other'],
+            starts_at=now-timedelta(days=1), expires_at=now+timedelta(days=1)))
+    response = client.get(f"/admin/users/{ids['direct_user']}/material-access", headers=auth(ids['admin']))
+    assert response.status_code == 200
+    assert [row['material']['id'] for row in response.json() if row['direct']] == [ids['other'], ids['material']]
+
+
+def test_student_material_access_preserves_expired_direct_grants(setup):
+    client, sessions, _, ids = setup
+    with sessions.begin() as db:
+        grant = db.get(models.AccessGrant, ids['direct'])
+        grant.expires_at = datetime.now(timezone.utc) - timedelta(hours=1)
+    response = client.get(f"/admin/users/{ids['direct_user']}/material-access", headers=auth(ids['admin']))
+    assert response.status_code == 200
+    assert any(row['direct'] and row['direct']['id'] == ids['direct'] for row in response.json())
+
+
+def test_admin_access_sources_exclude_expired_grants_and_deduplicate(setup):
+    client, sessions, _, ids = setup
+    now = datetime.now(timezone.utc)
+    with sessions.begin() as db:
+        material = db.get(models.Material, ids['material'])
+        material.tag_links.append(models.MaterialTag(tag_id=ids['new']))
+        db.add(models.TagAccessGrant(user_id=ids['old_user'], tag_id=ids['new'],
+            starts_at=now-timedelta(days=2), expires_at=now-timedelta(days=1)))
+    assert client.get(f"/admin/users/{ids['old_user']}/material-access", headers=auth(ids['old_user'])).status_code == 403
+    assert client.get('/admin/materials', headers=auth(ids['old_user'])).status_code == 403
+    response = client.get('/admin/materials', headers=auth(ids['admin']))
+    material = next(row for row in response.json() if row['id'] == ids['material'])
+    old = [row for row in material['sharing'] if row['user']['id'] == ids['old_user']]
+    assert len(old) == 1
+    assert [tag['id'] for tag in old[0]['tags']] == [ids['old']]
+    guest = client.get('/materials', headers=auth(ids['old_user']))
+    assert sum(row['id'] == ids['material'] for row in guest.json()) == 1
+    assert all('sharing' not in row and 'grants' not in row for row in guest.json())
+
+
+def test_multiple_tag_sources_survive_direct_revocation(setup):
+    client, sessions, _, ids = setup
+    now = datetime.now(timezone.utc)
+    with sessions.begin() as db:
+        material = db.get(models.Material, ids['material'])
+        material.tag_links.append(models.MaterialTag(tag_id=ids['new']))
+        db.add(models.TagAccessGrant(user_id=ids['old_user'], tag_id=ids['new'], starts_at=now-timedelta(days=1), expires_at=now+timedelta(days=1)))
+        direct = models.AccessGrant(user_id=ids['old_user'], material_id=ids['material'], starts_at=now-timedelta(days=1), expires_at=now+timedelta(days=1))
+        db.add(direct); db.flush(); direct_id = direct.id
+    response = client.delete(f'/admin/grants/{direct_id}', headers=auth(ids['admin']))
+    assert response.status_code == 204
+    assert ids['material'] in visible(setup, 'old_user')
+    rows = client.get(f"/admin/users/{ids['old_user']}/material-access", headers=auth(ids['admin'])).json()
+    row = next(item for item in rows if item['material']['id'] == ids['material'])
+    assert row['direct'] is None
+    assert {tag['id'] for tag in row['tags']} == {ids['old'], ids['new']}
+    assert client.delete(f"/admin/tags/{ids['old']}", headers=auth(ids['admin'])).status_code == 204
+    assert ids['material'] in visible(setup, 'old_user')
+
+
+def test_delete_tag_preserves_independent_access_and_material(setup):
+    client, sessions, _, ids = setup
+    with sessions.begin() as db:
+        material = db.get(models.Material, ids['material'])
+        material.tag_links.append(models.MaterialTag(tag_id=ids['new']))
+        now = datetime.now(timezone.utc)
+        db.add(models.AccessGrant(user_id=ids['old_user'], material_id=ids['material'],
+            starts_at=now-timedelta(days=1), expires_at=now+timedelta(days=1)))
+    assert client.delete(f"/admin/tags/{ids['old']}", headers=auth(ids['old_user'])).status_code == 403
+    response = client.delete(f"/admin/tags/{ids['old']}", headers=auth(ids['admin']))
+    assert response.status_code == 204, response.text
+    with sessions() as db:
+        assert db.get(models.Tag, ids['old']) is None
+        assert db.get(models.Material, ids['material']) is not None
+        assert {link.tag_id for link in db.get(models.Material, ids['material']).tag_links} == {ids['new']}
+        assert db.scalar(select(models.TagAccessGrant).where(models.TagAccessGrant.tag_id == ids['old'])) is None
+    assert ids['material'] in visible(setup, 'old_user')
+    assert ids['material'] in visible(setup, 'new_user')
+    assert ids['material'] in visible(setup, 'direct_user')
+    assert client.delete(f"/admin/tags/{ids['old']}", headers=auth(ids['admin'])).status_code == 404
+
+
+def test_delete_tag_revokes_only_its_access(setup):
+    client, sessions, _, ids = setup
+    assert ids['material'] in visible(setup, 'old_user')
+    assert ids['material'] in visible(setup, 'direct_user')
+    response = client.delete(f"/admin/tags/{ids['old']}", headers=auth(ids['admin']))
+    assert response.status_code == 204
+    assert ids['material'] not in visible(setup, 'old_user')
+    assert ids['material'] in visible(setup, 'direct_user')
+    assert ids['other'] in visible(setup, 'new_user')
+    with sessions() as db:
+        assert db.get(models.AccessGrant, ids['direct']) is not None
+        assert db.get(models.Tag, ids['new']) is not None
+
+
 def test_upload_reuses_existing_tag_without_renaming(setup, tmp_path, monkeypatch):
     from app.main import storage
     monkeypatch.setattr(storage, 'root', tmp_path.resolve())
