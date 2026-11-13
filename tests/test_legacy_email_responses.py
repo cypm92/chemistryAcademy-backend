@@ -2,9 +2,8 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
+
+from ephemeral_postgres import postgres_test_db
 
 from app import models
 from app.database import Base, get_db
@@ -13,10 +12,10 @@ from app.security import create_token
 
 
 @pytest.fixture
-def legacy_client():
-    engine = create_engine('sqlite://', connect_args={'check_same_thread': False}, poolclass=StaticPool)
+def legacy_client(postgres_test_db):
+    engine = postgres_test_db.engine
     Base.metadata.create_all(engine)
-    sessions = sessionmaker(bind=engine)
+    sessions = postgres_test_db.session_factory
     with sessions.begin() as db:
         admin = models.User(name='Admin', email='admin@example.com', password_hash='x', role='admin')
         student = models.User(name='Student', email='prueba@beciencia.local', password_hash='x', role='student')

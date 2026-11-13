@@ -1,11 +1,12 @@
 """PostgreSQL race regression; run only against a disposable, isolated database."""
-import os
+
 import threading
 import unittest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
-from sqlalchemy import create_engine, event, select
+from sqlalchemy import event, select
+from ephemeral_postgres import ephemeral_postgres
 from sqlalchemy.orm import sessionmaker
 
 from app import models, schemas
@@ -14,10 +15,14 @@ from app.main import update_admin_class, cancel_admin_class
 from app.notifications import enqueue_due_reminders, deliver_pending
 
 
-@unittest.skipUnless(os.getenv('ISOLATED_POSTGRES_TEST_URL'), 'requires disposable PostgreSQL')
 class ReminderRaceTest(unittest.TestCase):
+    def setUp(self):
+        context = ephemeral_postgres()
+        self.postgres = context.__enter__()
+        self.addCleanup(context.__exit__, None, None, None)
+
     def test_edit_between_booking_read_and_generation_lookup(self):
-        engine = create_engine(os.environ['ISOLATED_POSTGRES_TEST_URL'])
+        engine = self.postgres.engine
         Base.metadata.create_all(engine)
         sessions = sessionmaker(bind=engine, autoflush=False)
         start = (datetime.now(timezone.utc) + timedelta(days=1)).replace(hour=12, minute=0, second=0, microsecond=0)
@@ -69,7 +74,7 @@ class ReminderRaceTest(unittest.TestCase):
         engine.dispose()
 
     def test_cancellation_during_scheduling_invalidates_reminder(self):
-        engine = create_engine(os.environ['ISOLATED_POSTGRES_TEST_URL'])
+        engine = self.postgres.engine
         Base.metadata.create_all(engine)
         sessions = sessionmaker(bind=engine, autoflush=False)
         start = datetime.now(timezone.utc) + timedelta(hours=6)
@@ -112,7 +117,7 @@ class ReminderRaceTest(unittest.TestCase):
         engine.dispose()
 
     def test_cancellation_does_not_wait_for_inflight_smtp(self):
-        engine = create_engine(os.environ['ISOLATED_POSTGRES_TEST_URL'])
+        engine = self.postgres.engine
         Base.metadata.create_all(engine)
         sessions = sessionmaker(bind=engine, autoflush=False)
         start = datetime.now(timezone.utc) + timedelta(hours=4)

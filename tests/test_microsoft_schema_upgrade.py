@@ -1,42 +1,17 @@
 from concurrent.futures import ThreadPoolExecutor
-import os
 from threading import Barrier
-from uuid import uuid4
 
 import pytest
 from sqlalchemy import create_engine, inspect, text
+from ephemeral_postgres import postgres_test_db
 
 from app.database import ensure_application_schema
 from app import microsoft_auth_models
 
 
-@pytest.fixture(params=['sqlite', 'postgresql'])
-def db(request, tmp_path):
-    admin = None
-    schema = None
-    if request.param == 'sqlite':
-        url = f'sqlite:///{tmp_path / "legacy.sqlite"}'
-        engine = create_engine(url)
-    else:
-        url = os.getenv('MICROSOFT_SCHEMA_TEST_POSTGRES_URL')
-        if not url:
-            pytest.skip('MICROSOFT_SCHEMA_TEST_POSTGRES_URL must be a disposable database')
-        if not url.startswith(('postgresql://', 'postgresql+psycopg2://')):
-            pytest.fail('PostgreSQL required')
-        admin = create_engine(url)
-        schema = 'schema_test_' + uuid4().hex
-        with admin.begin() as conn:
-            conn.execute(text(f'CREATE SCHEMA "{schema}"'))
-        engine = create_engine(url, connect_args={'options': f'-csearch_path={schema}'})
-    try:
-        yield engine
-    finally:
-        engine.dispose()
-        if admin and schema:
-            with admin.begin() as conn:
-                conn.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
-            admin.dispose()
-
+@pytest.fixture
+def db(postgres_test_db):
+    return postgres_test_db.engine
 
 def legacy(db, credential=False):
     with db.begin() as conn:
@@ -122,10 +97,10 @@ def test_parallel_legacy_lease_upgrades(db):
         assert conn.execute(text('SELECT count(*) FROM teams_orphan_events WHERE completed_at IS NOT NULL')).scalar_one() == 1
 
 
-def test_application_schema_creates_and_upgrades_on_one_connection(tmp_path):
+def test_application_schema_creates_and_upgrades_on_one_connection(postgres_test_db):
     from app import database, microsoft_auth_models, teams_models
 
-    engine = create_engine(f'sqlite:///{tmp_path / "application.sqlite"}', pool_size=1, max_overflow=0)
+    engine = create_engine(postgres_test_db.engine.url, pool_size=1, max_overflow=0)
     try:
         legacy(engine)
         database.ensure_application_schema(engine)
@@ -138,19 +113,10 @@ def test_application_schema_creates_and_upgrades_on_one_connection(tmp_path):
 
 
 @pytest.mark.parametrize('with_legacy', [False, True])
-def test_postgres_concurrent_application_initialization(with_legacy):
+def test_postgres_concurrent_application_initialization(with_legacy, postgres_test_db):
     from app import database, models, microsoft_auth_models, teams_models
 
-    url = os.getenv('MICROSOFT_SCHEMA_TEST_POSTGRES_URL')
-    if not url:
-        pytest.skip('MICROSOFT_SCHEMA_TEST_POSTGRES_URL must be a disposable database')
-    if not url.startswith(('postgresql://', 'postgresql+psycopg2://')):
-        pytest.fail('PostgreSQL required')
-    admin = create_engine(url)
-    schema = 'schema_test_' + uuid4().hex
-    with admin.begin() as conn:
-        conn.execute(text(f'CREATE SCHEMA "{schema}"'))
-    engine = create_engine(url, connect_args={'options': f'-csearch_path={schema}'})
+    engine = postgres_test_db.engine
     try:
         if with_legacy:
             legacy(engine)
@@ -179,6 +145,3 @@ def test_postgres_concurrent_application_initialization(with_legacy):
                 assert conn.execute(text('SELECT count(*) FROM teams_orphan_events WHERE completed_at IS NOT NULL')).scalar_one() == 1
     finally:
         engine.dispose()
-        with admin.begin() as conn:
-            conn.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
-        admin.dispose()

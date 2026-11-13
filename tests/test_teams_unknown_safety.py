@@ -1,14 +1,15 @@
-"""Fail-closed creation tests; PostgreSQL requires a disposable database URL."""
+"""Fail-closed creation tests against disposable PostgreSQL instances."""
 import multiprocessing
 import os
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
-from uuid import uuid4
+
 
 import httpx
 import pytest
-from sqlalchemy import create_engine, select, text
+from sqlalchemy import create_engine, inspect, select, text
 from sqlalchemy.orm import sessionmaker
+from ephemeral_postgres import postgres_test_db
 
 from app import models
 from app.database import Base, ensure_application_schema
@@ -27,8 +28,9 @@ def booking():
 
 
 @pytest.mark.parametrize('status', [401, 403, 429])
-def test_explicit_creation_rejection_retries_with_same_transaction(status):
-    engine = create_engine('sqlite://')
+def test_explicit_creation_rejection_retries_with_same_transaction(status, postgres_test_db):
+    engine = postgres_test_db.engine
+    assert engine.dialect.name == 'postgresql'
     Base.metadata.create_all(engine)
     sessions = sessionmaker(engine)
     with sessions.begin() as db:
@@ -48,7 +50,7 @@ def test_explicit_creation_rejection_retries_with_same_transaction(status):
             assert job.last_error == f'graph_error_{status}'
             assert job.attempts == 1
             if status == 429:
-                assert (job.available_at - utcnow().replace(tzinfo=None)).total_seconds() > 110
+                assert (job.available_at - utcnow()).total_seconds() > 110
             job.available_at = utcnow() - timedelta(seconds=1)
         assert process_pending(sessions, lambda: IDENTITY, client)
     assert len(requests) == 2
@@ -59,8 +61,8 @@ def test_explicit_creation_rejection_retries_with_same_transaction(status):
 
 
 @pytest.mark.parametrize('status', [201, 500, 503])
-def test_ambiguous_creation_stays_unknown_after_revisions(status):
-    engine = create_engine('sqlite://')
+def test_ambiguous_creation_stays_unknown_after_revisions(status, postgres_test_db):
+    engine = postgres_test_db.engine
     Base.metadata.create_all(engine)
     sessions = sessionmaker(engine)
     with sessions.begin() as db:
@@ -82,20 +84,20 @@ def test_ambiguous_creation_stays_unknown_after_revisions(status):
     assert calls == ['POST']
 
 
-def test_sqlite_legacy_migration_is_idempotent():
-    engine = create_engine('sqlite://')
+def test_legacy_migration_is_idempotent(postgres_test_db):
+    engine = postgres_test_db.engine
     with engine.begin() as db:
         db.execute(text('CREATE TABLE teams_sync_jobs (id INTEGER PRIMARY KEY, booking_key VARCHAR(80) NOT NULL UNIQUE, booking_id INTEGER, revision INTEGER NOT NULL, desired VARCHAR(10) NOT NULL, transaction_id VARCHAR(36) NOT NULL, subject VARCHAR(500), starts_at TIMESTAMP, ends_at TIMESTAMP, event_id TEXT, join_url TEXT, applied_revision INTEGER NOT NULL, attempts INTEGER NOT NULL, available_at TIMESTAMP NOT NULL, lease_token VARCHAR(36), lease_expires_at TIMESTAMP, last_error TEXT)'))
         db.execute(text("INSERT INTO teams_sync_jobs (id, booking_key, revision, desired, transaction_id, applied_revision, attempts, available_at) VALUES (1, 'booking:1', 1, 'upsert', '99e6c369-1065-4356-9982-ced46867142b', 0, 0, CURRENT_TIMESTAMP)"))
     ensure_application_schema(engine)
     ensure_application_schema(engine)
     with engine.connect() as db:
-        assert db.execute(text('SELECT creation_in_flight, last_error FROM teams_sync_jobs')).one() == (1, 'creation_result_unknown')
+        assert db.execute(text('SELECT creation_in_flight, last_error FROM teams_sync_jobs')).one() == (True, 'creation_result_unknown')
         assert db.execute(text('SELECT job_id, transaction_id, revision, state FROM teams_creation_attempts')).all() == [(1, '99e6c369-1065-4356-9982-ced46867142b', 1, 'unknown')]
 
 
-def crash_worker(url, schema, entered, release):
-    engine = create_engine(url, connect_args={'options': f'-csearch_path={schema}'})
+def crash_worker(url, entered, release):
+    engine = create_engine(url)
     def accepted_then_crash(request):
         entered.set()
         release.wait(15)
@@ -104,15 +106,8 @@ def crash_worker(url, schema, entered, release):
         process_pending(sessionmaker(engine), lambda: IDENTITY, client)
 
 
-def test_postgres_legacy_migration_is_idempotent():
-    url = os.environ.get('TEAMS_TEST_POSTGRES_URL')
-    if not url:
-        pytest.skip('requires disposable PostgreSQL')
-    admin = create_engine(url)
-    schema = 'teams_migration_' + uuid4().hex
-    with admin.begin() as db:
-        db.execute(text(f'CREATE SCHEMA {schema}'))
-    engine = create_engine(url, connect_args={'options': f'-csearch_path={schema}'})
+def test_postgres_legacy_migration_is_idempotent(postgres_test_db):
+    engine = postgres_test_db.engine
     try:
         with engine.begin() as db:
             db.execute(text('CREATE TABLE teams_sync_jobs (id INTEGER PRIMARY KEY, booking_key VARCHAR(80) NOT NULL UNIQUE, booking_id INTEGER, revision INTEGER NOT NULL, desired VARCHAR(10) NOT NULL, transaction_id VARCHAR(36) NOT NULL, subject VARCHAR(500), starts_at TIMESTAMP, ends_at TIMESTAMP, event_id TEXT, join_url TEXT, applied_revision INTEGER NOT NULL, attempts INTEGER NOT NULL, available_at TIMESTAMP NOT NULL, lease_token VARCHAR(36), lease_expires_at TIMESTAMP, last_error TEXT)'))
@@ -124,20 +119,11 @@ def test_postgres_legacy_migration_is_idempotent():
             assert db.execute(text('SELECT job_id, transaction_id, revision, state FROM teams_creation_attempts')).all() == [(1, '99e6c369-1065-4356-9982-ced46867142b', 1, 'unknown')]
     finally:
         engine.dispose()
-        with admin.begin() as db:
-            db.execute(text(f'DROP SCHEMA {schema} CASCADE'))
-        admin.dispose()
 
 
-def test_postgres_process_crash_and_cancel_do_not_replay():
-    url = os.environ.get('TEAMS_TEST_POSTGRES_URL')
-    if not url:
-        pytest.skip('requires disposable PostgreSQL')
-    admin = create_engine(url)
-    schema = 'teams_unknown_' + uuid4().hex
-    with admin.begin() as db:
-        db.execute(text(f'CREATE SCHEMA {schema}'))
-    engine = create_engine(url, connect_args={'options': f'-csearch_path={schema}'})
+def test_postgres_process_crash_and_cancel_do_not_replay(postgres_test_db):
+    engine = postgres_test_db.engine
+    url = engine.url.render_as_string(hide_password=False)
     try:
         Base.metadata.create_all(engine)
         ensure_application_schema(engine)
@@ -149,7 +135,7 @@ def test_postgres_process_crash_and_cancel_do_not_replay():
         ctx = multiprocessing.get_context('spawn')
         entered = ctx.Event()
         release = ctx.Event()
-        worker = ctx.Process(target=crash_worker, args=(url, schema, entered, release))
+        worker = ctx.Process(target=crash_worker, args=(url, entered, release))
         worker.start()
         assert entered.wait(15)
         with sessions.begin() as db:
@@ -170,16 +156,13 @@ def test_postgres_process_crash_and_cancel_do_not_replay():
             assert job.applied_revision < job.revision
     finally:
         engine.dispose()
-        with admin.begin() as db:
-            db.execute(text(f'DROP SCHEMA {schema} CASCADE'))
-        admin.dispose()
 
 
-def test_malformed_legacy_schema_fails_closed_without_fabricating_identity():
-    engine = create_engine('sqlite://')
+def test_malformed_legacy_schema_fails_closed_without_fabricating_identity(postgres_test_db):
+    engine = postgres_test_db.engine
     with engine.begin() as db:
         db.execute(text('CREATE TABLE teams_sync_jobs (id INTEGER PRIMARY KEY, revision INTEGER)'))
     with pytest.raises(RuntimeError, match='transaction_id'):
         ensure_application_schema(engine)
     with engine.connect() as db:
-        assert not db.execute(text("SELECT 1 FROM sqlite_master WHERE name='teams_creation_attempts'")).first()
+        assert not inspect(db).has_table('teams_creation_attempts')

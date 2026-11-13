@@ -2,9 +2,9 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, event, select
+from sqlalchemy import select
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
+from ephemeral_postgres import postgres_test_db
 
 from app import main, models
 from app.database import Base, get_db
@@ -14,11 +14,9 @@ from app.teams_sync import enqueue_booking
 
 
 @pytest.fixture
-def ctx():
-    engine = create_engine('sqlite://', connect_args={'check_same_thread': False}, poolclass=StaticPool)
-    @event.listens_for(engine, 'connect')
-    def foreign_keys(connection, _):
-        connection.execute('PRAGMA foreign_keys=ON')
+def ctx(postgres_test_db):
+    engine = postgres_test_db.engine
+    assert engine.dialect.name == 'postgresql'
     Base.metadata.create_all(engine)
     sessions = sessionmaker(bind=engine)
     with sessions.begin() as db:
@@ -39,9 +37,9 @@ def ctx():
         engine.dispose()
 
 
-def add_booking(db, user_id, job=True, days=14, status='confirmed'):
+def add_booking(db, user_id, job=True, days=14, status='confirmed', booking_id=None):
     start = datetime.now(timezone.utc) + timedelta(days=days)
-    booking = models.Booking(user_id=user_id, starts_at=start, ends_at=start + timedelta(hours=1), status=status, note='Chemistry')
+    booking = models.Booking(id=booking_id, user_id=user_id, starts_at=start, ends_at=start + timedelta(hours=1), status=status, note='Chemistry')
     db.add(booking); db.flush()
     if job:
         enqueue_booking(db, booking, 'upsert')
@@ -93,7 +91,7 @@ def test_clean_delete_requires_all_durable_evidence_resolved(ctx, condition):
 
 
 @pytest.mark.parametrize('route', ['class', 'user'])
-def test_physical_delete_detaches_job_before_sqlite_reuses_booking_id(ctx, route):
+def test_physical_delete_detaches_job_before_booking_id_is_reused(ctx, route):
     sessions, client, (admin, user) = ctx
     with sessions.begin() as db:
         booking_id = add_booking(db, user)
@@ -104,7 +102,7 @@ def test_physical_delete_detaches_job_before_sqlite_reuses_booking_id(ctx, route
     path = f'/admin/classes/{booking_id}' if route == 'class' else f'/admin/users/{user}'
     assert client.delete(path, headers={'Authorization': f'Bearer {create_token(admin)}'}).status_code == 204
     with sessions.begin() as db:
-        new_id = add_booking(db, admin)
+        new_id = add_booking(db, admin, booking_id=booking_id)
         assert new_id == booking_id
         jobs = db.scalars(select(TeamsSyncJob).order_by(TeamsSyncJob.id)).all()
         assert len(jobs) == 2
@@ -207,17 +205,11 @@ def test_delete_past_class_restriction_keeps_job(ctx):
         assert (job.desired, job.revision) == ('upsert', 1)
 
 
-def test_postgres_user_delete_blocks_new_fk_booking_and_class_writers(monkeypatch):
-    import os
+def test_postgres_user_delete_blocks_new_fk_booking_and_class_writers(monkeypatch, postgres_test_db):
     import threading
     from sqlalchemy import text
     from sqlalchemy.exc import DBAPIError, IntegrityError
-    url = os.environ.get('TEAMS_DELETE_TEST_POSTGRES_URL')
-    if not url:
-        pytest.skip('TEAMS_DELETE_TEST_POSTGRES_URL must name a disposable database')
-    from sqlalchemy.engine import make_url
-    assert make_url(url).database == 'teams_delete_disposable', 'refusing to drop a non-disposable database'
-    engine = create_engine(url)
+    engine = postgres_test_db.engine
     Base.metadata.create_all(engine)
     sessions = sessionmaker(bind=engine)
     entered, release = threading.Event(), threading.Event()
@@ -280,5 +272,4 @@ def test_postgres_user_delete_blocks_new_fk_booking_and_class_writers(monkeypatc
         if 'thread' in locals():
             thread.join(10)
         main.app.dependency_overrides.clear()
-        Base.metadata.drop_all(engine)
         engine.dispose()

@@ -1,11 +1,10 @@
-import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
 import httpx
 import pytest
 from cryptography.fernet import Fernet
-from sqlalchemy import create_engine
+from ephemeral_postgres import postgres_test_db
 from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
@@ -18,8 +17,8 @@ ACCOUNT = '22222222-2222-4222-8222-222222222222'
 
 
 @pytest.fixture
-def identity_db(tmp_path):
-    engine = create_engine('sqlite:///' + str(tmp_path / 'identity.db'))
+def identity_db(postgres_test_db):
+    engine = postgres_test_db.engine
     Base.metadata.create_all(engine, tables=[MicrosoftCredential.__table__, MicrosoftOAuthGeneration.__table__])
     factory = sessionmaker(engine)
     key = Fernet.generate_key().decode()
@@ -59,10 +58,9 @@ def test_missing_or_mismatched_identity_fails_before_http(identity_db, change):
             microsoft_refresh.get_access_token_with_identity(factory, config, client)
 
 
-@pytest.mark.skipif(not os.getenv('ISOLATED_POSTGRES_TEST_URL'), reason='requires disposable PostgreSQL')
 @pytest.mark.parametrize('change', ['generation', 'binding_account', 'credential_account', 'reconnect', 'disconnect'])
-def test_postgres_identity_change_during_http_fences_result(change):
-    engine = create_engine(os.environ['ISOLATED_POSTGRES_TEST_URL'])
+def test_postgres_identity_change_during_http_fences_result(change, postgres_test_db):
+    engine = postgres_test_db.engine
     tables = [MicrosoftCredential.__table__, MicrosoftOAuthGeneration.__table__]
     Base.metadata.create_all(engine, tables=tables)
     factory = sessionmaker(engine)

@@ -2,8 +2,8 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import httpx
-from sqlalchemy import create_engine, select
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy import select
+from ephemeral_postgres import postgres_test_db
 
 from app.database import Base
 from app.microsoft_refresh import MicrosoftAccessTokenIdentity
@@ -12,10 +12,11 @@ from app.teams_models import TeamsCreationAttempt, TeamsSyncJob
 from app.teams_sync import enqueue_booking, process_pending
 
 
-def test_creation_attempt_committed_before_post():
-    engine = create_engine('sqlite://')
+def test_creation_attempt_committed_before_post(postgres_test_db):
+    engine = postgres_test_db.engine
+    assert engine.dialect.name == 'postgresql'
     Base.metadata.create_all(engine)
-    sessions = sessionmaker(engine)
+    sessions = postgres_test_db.session_factory
     booking = SimpleNamespace(id=912, starts_at=datetime(2026, 1, 1, tzinfo=timezone.utc), ends_at=datetime(2026, 1, 2, tzinfo=timezone.utc), guest_name='A', guest_email='a@example.org', user=None)
     with sessions.begin() as db:
         db.add(MicrosoftOAuthGeneration(id=1, generation=4, tenant_id='tenant', account_object_id='account'))
@@ -34,10 +35,10 @@ def test_creation_attempt_committed_before_post():
         assert (attempt.state, attempt.event_id) == ('identified', 'remote')
 
 
-def test_post_rejection_is_recorded_as_rejected():
-    engine = create_engine('sqlite://')
+def test_post_rejection_is_recorded_as_rejected(postgres_test_db):
+    engine = postgres_test_db.engine
     Base.metadata.create_all(engine)
-    sessions = sessionmaker(engine)
+    sessions = postgres_test_db.session_factory
     booking = SimpleNamespace(id=915, starts_at=datetime(2026, 1, 1, tzinfo=timezone.utc), ends_at=datetime(2026, 1, 2, tzinfo=timezone.utc), guest_name='A', guest_email='a@example.org', user=None)
     with sessions.begin() as db:
         db.add(MicrosoftOAuthGeneration(id=1, generation=4, tenant_id='tenant', account_object_id='account'))
@@ -53,10 +54,10 @@ def test_post_rejection_is_recorded_as_rejected():
         assert db.scalar(select(TeamsCreationAttempt)).state == 'rejected'
 
 
-def test_switched_identity_blocks_creation():
-    engine = create_engine('sqlite://')
+def test_switched_identity_blocks_creation(postgres_test_db):
+    engine = postgres_test_db.engine
     Base.metadata.create_all(engine)
-    sessions = sessionmaker(engine)
+    sessions = postgres_test_db.session_factory
     booking = SimpleNamespace(id=913, starts_at=datetime(2026, 1, 1, tzinfo=timezone.utc), ends_at=datetime(2026, 1, 2, tzinfo=timezone.utc), guest_name='A', guest_email='a@example.org', user=None)
     with sessions.begin() as db:
         db.add(MicrosoftOAuthGeneration(id=1, generation=5, tenant_id='tenant', account_object_id='other'))
@@ -70,10 +71,10 @@ def test_switched_identity_blocks_creation():
         assert db.scalar(select(TeamsCreationAttempt)) is None
 
 
-def test_late_callback_preserves_new_selection():
-    engine = create_engine('sqlite://')
+def test_late_callback_preserves_new_selection(postgres_test_db):
+    engine = postgres_test_db.engine
     Base.metadata.create_all(engine)
-    sessions = sessionmaker(engine)
+    sessions = postgres_test_db.session_factory
     booking = SimpleNamespace(id=914, starts_at=datetime(2026, 1, 1, tzinfo=timezone.utc), ends_at=datetime(2026, 1, 2, tzinfo=timezone.utc), guest_name='A', guest_email='a@example.org', user=None)
     with sessions.begin() as db:
         db.add(MicrosoftOAuthGeneration(id=1, generation=4, tenant_id='tenant', account_object_id='account'))

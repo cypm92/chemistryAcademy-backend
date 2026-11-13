@@ -1,10 +1,11 @@
-import os
+
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
+from ephemeral_postgres import postgres_test_db
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from app.database import ensure_application_schema
@@ -13,28 +14,9 @@ from app.teams_models import TeamsEventOwnership as Ownership
 TENANT = 'aaaaaaaa-0000-0000-0000-000000000001'
 ACCOUNT = 'bbbbbbbb-0000-0000-0000-000000000002'
 
-@pytest.fixture(params=['sqlite', 'postgresql'])
-def engine(request, tmp_path):
-    admin = None
-    if request.param == 'sqlite':
-        db = create_engine(f'sqlite:///{tmp_path / "ownership.sqlite"}', connect_args={'timeout': 10})
-    else:
-        url = os.getenv('MICROSOFT_SCHEMA_TEST_POSTGRES_URL')
-        if not url:
-            pytest.skip('disposable PostgreSQL URL not configured')
-        admin = create_engine(url)
-        schema = 'ownership_' + uuid4().hex
-        with admin.begin() as conn:
-            conn.execute(text(f'CREATE SCHEMA "{schema}"'))
-        db = create_engine(url, connect_args={'options': f'-csearch_path={schema}'})
-    try:
-        yield db
-    finally:
-        db.dispose()
-        if admin:
-            with admin.begin() as conn:
-                conn.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
-            admin.dispose()
+@pytest.fixture
+def engine(postgres_test_db):
+    return postgres_test_db.engine
 
 
 def test_legacy_durability(engine):

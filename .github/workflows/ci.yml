@@ -21,7 +21,9 @@ jobs:
   validate:
     name: CI backend
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # La batería PostgreSQL crea una instancia por caso; los 441 casos
+    # anteriores tardaron 40 minutos localmente, sin incluir builds de CI.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -36,6 +38,18 @@ jobs:
       # Esta prueba necesita git y Docker del runner, no del contenedor aislado.
       - name: Comprobar exclusión de archivos de entorno
         run: python -m pytest tests/test_env_ignore.py -v --junitxml="${RUNNER_TEMP}/backend-host.xml"
+      - name: Comprobar contenedores PostgreSQL efímeros
+        run: |
+          docker pull postgres:16-alpine
+          python -m pytest tests/test_ephemeral_postgres.py -v --junitxml="${RUNNER_TEMP}/backend-postgres-fixture.xml"
+          python tests/run_ephemeral_material_tests.py --host-shard-count 2 --host-shard-index 0 -v --junitxml="${RUNNER_TEMP}/backend-material-postgres-0.xml" &
+          shard0=$!
+          python tests/run_ephemeral_material_tests.py --host-shard-count 2 --host-shard-index 1 -v --junitxml="${RUNNER_TEMP}/backend-material-postgres-1.xml" &
+          shard1=$!
+          result=0
+          wait "$shard0" || result=$?
+          wait "$shard1" || result=$?
+          exit "$result"
       - name: Ejecutar pruebas con PostgreSQL en red Docker interna
         run: |
           set -eu
@@ -75,8 +89,19 @@ jobs:
           CREATE DATABASE teams_delete_disposable;
           CREATE DATABASE microsoft_e2e_disposable;
           CREATE DATABASE integration_disposable;
+          CREATE DATABASE app_startup_disposable;
           SQL
-          docker create --name "$test_container" --network "$network"             -e SMTP_MODE=log -e MICROSOFT_SYNC_ENABLED=false             -e ISOLATED_POSTGRES_TEST_URL=postgresql://ci_test:ci_test_password@postgres:5432/booking_disposable             -e TEST_REPORT_DATABASE_URL=postgresql://ci_test:ci_test_password@postgres:5432/reports_disposable             -e OAUTH_ISOLATED_POSTGRES_TEST_URL=postgresql://ci_test:ci_test_password@postgres:5432/oauth_disposable             -e MICROSOFT_SCHEMA_TEST_POSTGRES_URL=postgresql://ci_test:ci_test_password@postgres:5432/schema_disposable             -e TEAMS_TEST_POSTGRES_URL=postgresql://ci_test:ci_test_password@postgres:5432/teams_disposable             -e TEAMS_DELETE_TEST_POSTGRES_URL=postgresql://ci_test:ci_test_password@postgres:5432/teams_delete_disposable             -e MICROSOFT_E2E_POSTGRES_URL=postgresql://ci_test:ci_test_password@postgres:5432/microsoft_e2e_disposable             -e INTEGRATION_TEST_POSTGRES_URL=postgresql://ci_test:ci_test_password@postgres:5432/integration_disposable             "$image" python -m pytest tests --ignore=tests/test_env_ignore.py -v -ra --junitxml=/tmp/backend-pytest.xml
+          # Attest this exact isolated PostgreSQL instance inside the test container.
+          server_id="$(docker exec "$db" psql -U ci_test -d postgres -At -c 'SELECT system_identifier FROM pg_control_system()')"
+          docker() {
+            if [ "$1" = create ]; then
+              shift
+              command docker create -e BECIENCIA_CI_PG_SYSTEM_ID="$server_id" "$@"
+            else
+              command docker "$@"
+            fi
+          }
+          docker create --name "$test_container" --network "$network" -e PYTEST_ADDOPTS="$(python tests/ephemeral_manifest.py)"             -e SMTP_MODE=log -e MICROSOFT_SYNC_ENABLED=false             -e DATABASE_URL=postgresql://ci_test:ci_test_password@postgres:5432/app_startup_disposable -e STORAGE_DIR=/tmp/beciencia-storage             -e ISOLATED_POSTGRES_TEST_URL=postgresql://ci_test:ci_test_password@postgres:5432/booking_disposable             -e TEST_REPORT_DATABASE_URL=postgresql://ci_test:ci_test_password@postgres:5432/reports_disposable             -e OAUTH_ISOLATED_POSTGRES_TEST_URL=postgresql://ci_test:ci_test_password@postgres:5432/oauth_disposable             -e MICROSOFT_SCHEMA_TEST_POSTGRES_URL=postgresql://ci_test:ci_test_password@postgres:5432/schema_disposable             -e TEAMS_TEST_POSTGRES_URL=postgresql://ci_test:ci_test_password@postgres:5432/teams_disposable             -e TEAMS_DELETE_TEST_POSTGRES_URL=postgresql://ci_test:ci_test_password@postgres:5432/teams_delete_disposable             -e MICROSOFT_E2E_POSTGRES_URL=postgresql://ci_test:ci_test_password@postgres:5432/microsoft_e2e_disposable             -e INTEGRATION_TEST_POSTGRES_URL=postgresql://ci_test:ci_test_password@postgres:5432/integration_disposable             "$image" python -m pytest tests --ignore=tests/test_env_ignore.py --ignore=tests/test_ephemeral_postgres.py -v -ra --junitxml=/tmp/backend-pytest.xml
           result=0
           docker start -a "$test_container" || result=$?
           docker cp "$test_container:/tmp/backend-pytest.xml" "${RUNNER_TEMP}/backend-pytest.xml" || exit 1
@@ -88,11 +113,17 @@ jobs:
           import os
           import xml.etree.ElementTree as ET
           allowed = ('tests.test_callback_access_logging', 'test_nginx_callback_location_disables_access_logging_and_preserves_proxy')
-          for filename in ('backend-host.xml', 'backend-pytest.xml'):
+          seen = set()
+          for filename in ('backend-host.xml', 'backend-postgres-fixture.xml', 'backend-material-postgres-0.xml', 'backend-material-postgres-1.xml', 'backend-pytest.xml'):
               report = ET.parse(os.path.join(os.environ['RUNNER_TEMP'], filename))
               cases = list(report.iter('testcase'))
               if not cases:
                   raise SystemExit(f'Informe vacío: {filename}')
+              for case in cases:
+                  identity = (case.get('classname'), case.get('name'))
+                  if identity in seen:
+                      raise SystemExit(f'Prueba duplicada en informes: {identity}')
+                  seen.add(identity)
               unexpected = [case.get('classname', '') + '::' + case.get('name', '')
                             for case in cases if case.find('skipped') is not None
                             and (case.get('classname'), case.get('name')) != allowed]

@@ -1,5 +1,4 @@
-"""Run only against a disposable PostgreSQL database via ISOLATED_POSTGRES_TEST_URL."""
-import os
+"""Run against a dedicated disposable PostgreSQL server."""
 import threading
 import unittest
 from uuid import uuid4
@@ -7,7 +6,8 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 from fastapi import HTTPException
-from sqlalchemy import create_engine, event, select
+from sqlalchemy import event, select
+from ephemeral_postgres import ephemeral_postgres
 from sqlalchemy.orm import sessionmaker
 
 from app import models, schemas
@@ -15,10 +15,14 @@ from app.database import Base
 from app.main import block_booking_range
 
 
-@unittest.skipUnless(os.getenv('ISOLATED_POSTGRES_TEST_URL'), 'requires disposable PostgreSQL')
 class BookingRaceTest(unittest.TestCase):
+    def setUp(self):
+        context = ephemeral_postgres()
+        self.postgres = context.__enter__()
+        self.addCleanup(context.__exit__, None, None, None)
+
     def test_concurrent_overlapping_blocks(self):
-        engine = create_engine(os.environ['ISOLATED_POSTGRES_TEST_URL'])
+        engine = self.postgres.engine
         Base.metadata.create_all(engine)
         sessions = sessionmaker(bind=engine, autoflush=False)
         start = datetime(2040, 1, 2, 12, tzinfo=timezone.utc) + timedelta(seconds=uuid4().int % 100000000)

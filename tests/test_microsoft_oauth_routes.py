@@ -1,3 +1,4 @@
+from ephemeral_postgres import postgres_test_db
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -37,14 +38,12 @@ def test_calendar_scope_is_requested():
     assert 'Calendars.ReadWrite' in SCOPES.split()
 
 
-def test_flow_and_replay(monkeypatch):
+def test_flow_and_replay(monkeypatch, postgres_test_db):
     import hashlib, base64
     from urllib.parse import urlparse, parse_qs
     import httpx
     from cryptography.fernet import Fernet
-    from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker
-    from sqlalchemy.pool import StaticPool
     from app.database import Base
     from app.models import User
     from app.microsoft_auth_models import MicrosoftCredential, MicrosoftOAuthState, MicrosoftOAuthGeneration
@@ -54,7 +53,7 @@ def test_flow_and_replay(monkeypatch):
     client_id = '22222222-2222-4222-8222-222222222222'
     for key, val in {'MICROSOFT_TENANT_ID': tenant, 'MICROSOFT_CLIENT_ID': client_id, 'MICROSOFT_CLIENT_SECRET': 'fake-secret', 'MICROSOFT_REDIRECT_URI': 'https://example.test/integrations/microsoft/callback', 'MICROSOFT_FERNET_KEY': Fernet.generate_key().decode()}.items():
         monkeypatch.setenv(key, val)
-    engine = create_engine('sqlite://', connect_args={'check_same_thread': False}, poolclass=StaticPool)
+    engine = postgres_test_db.engine
     Base.metadata.create_all(engine, tables=[User.__table__, MicrosoftCredential.__table__, MicrosoftOAuthState.__table__, MicrosoftOAuthGeneration.__table__])
     factory = sessionmaker(bind=engine, expire_on_commit=False)
     with factory.begin() as db:
@@ -157,11 +156,10 @@ def test_admin_endpoints_require_bearer():
     assert browser.post('/admin/integrations/microsoft/disconnect').status_code == 401
 
 
-def test_disconnect_during_callback_prevents_reconnection(monkeypatch, tmp_path):
+def test_disconnect_during_callback_prevents_reconnection(monkeypatch, postgres_test_db):
     from urllib.parse import urlparse, parse_qs
     import httpx
     from cryptography.fernet import Fernet
-    from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker
     from app.database import Base
     from app.models import User
@@ -169,9 +167,7 @@ def test_disconnect_during_callback_prevents_reconnection(monkeypatch, tmp_path)
     from app.microsoft_oauth_routes import router, get_session_factory, get_http_transport
     from app.security import admin_user
     for key, value in {'MICROSOFT_TENANT_ID':'11111111-1111-4111-8111-111111111111', 'MICROSOFT_CLIENT_ID':'22222222-2222-4222-8222-222222222222', 'MICROSOFT_CLIENT_SECRET':'fake', 'MICROSOFT_REDIRECT_URI':'https://example.test/integrations/microsoft/callback', 'MICROSOFT_FERNET_KEY':Fernet.generate_key().decode()}.items(): monkeypatch.setenv(key, value)
-    import os
-    url = os.getenv('OAUTH_ISOLATED_POSTGRES_TEST_URL')
-    engine = create_engine(url) if url else create_engine('sqlite:///' + str(tmp_path / 'test.db'), connect_args={'check_same_thread':False})
+    engine = postgres_test_db.engine
     Base.metadata.create_all(engine)
     factory = sessionmaker(bind=engine, expire_on_commit=False)
     with factory.begin() as db:
@@ -196,17 +192,14 @@ def test_disconnect_during_callback_prevents_reconnection(monkeypatch, tmp_path)
         assert db.get(MicrosoftCredential, 1) is None
 
 
-def test_postgres_callback_fences_inflight_refresh(monkeypatch):
-    import os
+def test_postgres_callback_fences_inflight_refresh(monkeypatch, postgres_test_db):
     import threading
     from concurrent.futures import ThreadPoolExecutor
     from urllib.parse import parse_qs, urlparse
-    from uuid import uuid4
 
     import httpx
     import pytest
     from cryptography.fernet import Fernet
-    from sqlalchemy import create_engine, text
     from sqlalchemy.orm import sessionmaker
     from app.database import Base
     from app.models import User
@@ -215,18 +208,10 @@ def test_postgres_callback_fences_inflight_refresh(monkeypatch):
     from app.microsoft_refresh import get_access_token, MicrosoftRefreshError
     from app.security import admin_user
 
-    url = os.getenv('OAUTH_ISOLATED_POSTGRES_TEST_URL')
-    if not url:
-        pytest.skip('requires disposable PostgreSQL')
     key = Fernet.generate_key().decode()
     for name, value in {'MICROSOFT_TENANT_ID': '11111111-1111-4111-8111-111111111111', 'MICROSOFT_CLIENT_ID': '22222222-2222-4222-8222-222222222222', 'MICROSOFT_CLIENT_SECRET': 'fake', 'MICROSOFT_REDIRECT_URI': 'https://example.test/integrations/microsoft/callback', 'MICROSOFT_FERNET_KEY': key}.items():
         monkeypatch.setenv(name, value)
-    root = create_engine(url)
-    assert root.dialect.name == 'postgresql'
-    schema = 'oauth_test_' + uuid4().hex
-    with root.begin() as connection:
-        connection.execute(text(f'CREATE SCHEMA "{schema}"'))
-    engine = create_engine(url, connect_args={'options': f'-csearch_path={schema}'})
+    engine = postgres_test_db.engine
     release = threading.Event()
     try:
         Base.metadata.create_all(engine, tables=[User.__table__, MicrosoftCredential.__table__, MicrosoftOAuthState.__table__, MicrosoftOAuthGeneration.__table__])
@@ -290,6 +275,3 @@ def test_postgres_callback_fences_inflight_refresh(monkeypatch):
     finally:
         release.set()
         engine.dispose()
-        with root.begin() as connection:
-            connection.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
-        root.dispose()

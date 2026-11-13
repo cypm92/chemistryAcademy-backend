@@ -1234,6 +1234,33 @@ def parse_tag_names(raw_tags: str) -> list[str]:
     return names
 
 
+def resolve_material_tags(db: Session, names: list[str], *, current: list[models.Tag] | None = None,
+                          requested: list[str] | None = None) -> list[models.Tag]:
+    existing: dict[str, list[models.Tag]] = {}
+    for tag in db.scalars(select(models.Tag).order_by(models.Tag.id)):
+        existing.setdefault(tag.name.casefold(), []).append(tag)
+    resolved = []
+    for name in names:
+        candidates = existing.get(name.casefold(), [])
+        if len(candidates) > 1:
+            original = [tag for tag in (current or []) if tag.name.casefold() == name.casefold()]
+            submitted = {value for value in (requested or []) if value.upper().casefold() == name.casefold()}
+            retained = [tag for tag in original if tag.name in submitted]
+            if not retained or submitted != {tag.name for tag in original}:
+                raise HTTPException(409, 'Etiqueta ambigua: existen varias etiquetas equivalentes. No se han guardado los cambios.')
+            resolved.extend(retained)
+            continue
+        if candidates:
+            tag = candidates[0]
+        else:
+            tag = models.Tag(name=name)
+            db.add(tag)
+            db.flush()
+            existing[name.casefold()] = [tag]
+        resolved.append(tag)
+    return resolved
+
+
 def active_material_grant(material_id: int, user_id: int, now: datetime, db: Session) -> models.AccessGrant | models.TagAccessGrant | None:
     direct = db.scalar(select(models.AccessGrant).where(
         models.AccessGrant.user_id == user_id, models.AccessGrant.material_id == material_id,
@@ -1396,22 +1423,48 @@ async def upload_material(title: str = Form(...), description: str = Form(""), f
     folder = db.get(models.Folder, folder_id)
     if not folder:
         raise HTTPException(404, "La carpeta seleccionada no existe")
+    resolved_tags = resolve_material_tags(db, parse_tag_names(tags))
     key, size = await storage.save(file)
     material = models.Material(title=title, description=description, folder_id=folder.id, kind=kind,
                                filename=file.filename or key, storage_key=key,
                                content_type=content_type, size_bytes=size)
     db.add(material)
-    for name in parse_tag_names(tags):
-        tag = db.scalar(select(models.Tag).where(models.Tag.name.ilike(name)))
-        if not tag:
-            tag = models.Tag(name=name)
-            db.add(tag)
-            db.flush()
-        elif tag.name != name:
-            tag.name = name
+    for tag in resolved_tags:
         material.tag_links.append(models.MaterialTag(tag=tag))
     db.commit(); db.refresh(material)
     return material_data(material)
+
+
+@app.patch("/admin/materials/{material_id}", response_model=schemas.MaterialOut)
+def update_material(material_id: int, data: schemas.MaterialUpdate, user: models.User = Depends(admin_user),
+                    db: Session = Depends(get_db)):
+    title = data.title.strip()
+    if not title:
+        raise HTTPException(400, "El título es obligatorio")
+    names = parse_tag_names(",".join(data.tags))
+    try:
+        material = db.scalar(select(models.Material).where(models.Material.id == material_id).with_for_update())
+        if not material or material.is_class_attachment:
+            raise HTTPException(404, "Material no encontrado")
+        requested = [value.strip() for item in data.tags for value in item.split(',') if value.strip()]
+        desired = resolve_material_tags(db, names, current=[link.tag for link in material.tag_links], requested=requested)
+        desired_ids = {tag.id for tag in desired}
+        existing_links = {link.tag_id: link for link in material.tag_links}
+        material.tag_links[:] = [link for link in material.tag_links if link.tag_id in desired_ids]
+        for tag in desired:
+            if tag.id not in existing_links:
+                material.tag_links.append(models.MaterialTag(tag=tag))
+        material.title = title
+        db.flush()
+        result = material_data(material)
+        result["is_favorite"] = db.scalar(select(models.MaterialFavorite.id).where(
+            models.MaterialFavorite.user_id == user.id, models.MaterialFavorite.material_id == material.id,
+        )) is not None
+        db.commit()
+        return result
+    except Exception:
+        db.rollback()
+        raise
 
 
 @app.patch("/admin/materials/{material_id}/folder", response_model=schemas.MaterialOut)

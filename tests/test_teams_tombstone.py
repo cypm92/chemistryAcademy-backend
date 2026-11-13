@@ -1,42 +1,25 @@
 from teams_identity_fixtures import IDENTITY, seed_account, seed_identified_event
 from datetime import datetime, timedelta, timezone
-import os
 from uuid import uuid4
 
 import httpx
 import pytest
-from sqlalchemy import create_engine, select, text
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy import select
+from ephemeral_postgres import postgres_test_db
 
 from app import models, teams_sync
 from app.database import Base
 from app.teams_models import TeamsCreationAttempt, TeamsSyncJob
 
 
-@pytest.fixture(params=['sqlite', 'postgresql'])
-def sessions(request):
-    admin = None
-    if request.param == 'postgresql':
-        url = os.environ.get('TEAMS_TEST_POSTGRES_URL')
-        if not url:
-            pytest.skip('TEAMS_TEST_POSTGRES_URL not set')
-        admin = create_engine(url)
-        schema = 'teams_test_' + uuid4().hex
-        with admin.begin() as conn:
-            conn.execute(text(f'CREATE SCHEMA {schema}'))
-        engine = create_engine(url, connect_args={'options': f'-csearch_path={schema}'})
-    else:
-        engine = create_engine('sqlite://')
+@pytest.fixture
+def sessions(postgres_test_db):
+    engine = postgres_test_db.engine
     Base.metadata.create_all(engine)
-    factory = sessionmaker(engine)
+    factory = postgres_test_db.session_factory
     with factory.begin() as db:
         seed_account(db)
-    yield factory
-    engine.dispose()
-    if admin:
-        with admin.begin() as conn:
-            conn.execute(text(f'DROP SCHEMA {schema} CASCADE'))
-        admin.dispose()
+    return factory
 
 
 def booking():
@@ -58,8 +41,7 @@ def test_detach_isolates_reused_id_and_preserves_orphan(sessions, monkeypatch):
         db.delete(old)
     with sessions.begin() as db:
         new = booking()
-        if db.get_bind().dialect.name == 'postgresql':
-            new.id = old_id  # Explicitly model a recycled sequence value.
+        new.id = old_id  # Explicitly model a recycled sequence value.
         db.add(new); db.flush()
         assert new.id == old_id
         teams_sync.enqueue_booking(db, new, 'upsert')

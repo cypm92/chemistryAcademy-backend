@@ -2,9 +2,9 @@ import unittest
 from datetime import datetime, timedelta, timezone
 
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, select
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
+from sqlalchemy import select
+
+from ephemeral_postgres import ephemeral_postgres
 
 from app import models
 from app.database import Base, get_db
@@ -14,9 +14,12 @@ from app.security import create_token
 
 class GuestBookingFlowTest(unittest.TestCase):
     def setUp(self):
-        self.engine = create_engine('sqlite://', connect_args={'check_same_thread': False}, poolclass=StaticPool)
+        self.postgres = ephemeral_postgres()
+        database = self.postgres.__enter__()
+        self.addCleanup(self.postgres.__exit__, None, None, None)
+        self.engine = database.engine
         Base.metadata.create_all(self.engine)
-        self.sessions = sessionmaker(bind=self.engine)
+        self.sessions = database.session_factory
         def get_test_db():
             with self.sessions() as db:
                 yield db

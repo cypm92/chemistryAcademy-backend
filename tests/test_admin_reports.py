@@ -1,5 +1,6 @@
 import unittest
 from datetime import datetime, timezone
+from ephemeral_postgres import ephemeral_postgres
 
 
 class ReportScheduleTest(unittest.TestCase):
@@ -17,13 +18,15 @@ class ReportScheduleTest(unittest.TestCase):
 
 class ReportsTest(unittest.TestCase):
     def setUp(self):
-        from sqlalchemy import create_engine
-        from sqlalchemy.orm import sessionmaker
         from app.database import Base
         from app import models  # Register mappings before creating the isolated schema.
-        self.engine = create_engine("sqlite:///:memory:")
+        context = ephemeral_postgres()
+        database = context.__enter__()
+        self.addCleanup(context.__exit__, None, None, None)
+        self.engine = database.engine
+        self.assertEqual(self.engine.dialect.name, 'postgresql')
         Base.metadata.create_all(self.engine)
-        self.sessions = sessionmaker(bind=self.engine)
+        self.sessions = database.session_factory
 
     def tearDown(self):
         self.engine.dispose()

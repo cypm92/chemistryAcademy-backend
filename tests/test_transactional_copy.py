@@ -1,8 +1,9 @@
 import unittest
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import create_engine, select
+from sqlalchemy import select
 from sqlalchemy.orm import sessionmaker
+from ephemeral_postgres import ephemeral_postgres
 
 from unittest.mock import patch
 from app import models
@@ -12,6 +13,12 @@ from app.notifications import (enqueue_booking_request, enqueue_booking_decision
 
 
 class TransactionalCopyTest(unittest.TestCase):
+    def postgres_engine(self):
+        context = ephemeral_postgres()
+        database = context.__enter__()
+        self.addCleanup(context.__exit__, None, None, None)
+        return database.engine
+
     def test_html_uses_separate_paragraphs_and_highlights_class_details(self):
         from app.notifications import _send
         body = 'Hola, Ana:\n\nTu clase está lista.\n\nFecha y hora: lunes 2 de noviembre\nAsignatura o nota: Química\n\nUn saludo'
@@ -24,7 +31,8 @@ class TransactionalCopyTest(unittest.TestCase):
         self.assertGreaterEqual(html.count('<p '), 2)
         self.assertEqual(message.get_body(preferencelist=('plain',)).get_content().rstrip('\n'), body)
     def test_request_gives_student_clear_pending_status_and_local_range(self):
-        engine = create_engine('sqlite:///:memory:')
+        engine = self.postgres_engine()
+        self.assertEqual(engine.dialect.name, 'postgresql')
         Base.metadata.create_all(engine)
         with sessionmaker(bind=engine)() as db:
             start = datetime(2030, 1, 5, 9, tzinfo=timezone.utc)
@@ -42,7 +50,7 @@ class TransactionalCopyTest(unittest.TestCase):
         engine.dispose()
 
     def test_scenario_messages_are_specific_and_admin_can_identify_student(self):
-        engine = create_engine('sqlite:///:memory:')
+        engine = self.postgres_engine()
         Base.metadata.create_all(engine)
         with sessionmaker(bind=engine)() as db:
             start = datetime(2030, 1, 5, 9, tzinfo=timezone.utc)
@@ -73,7 +81,7 @@ class TransactionalCopyTest(unittest.TestCase):
         engine.dispose()
 
     def test_reminder_and_contact_copy_include_actionable_details(self):
-        engine = create_engine('sqlite:///:memory:')
+        engine = self.postgres_engine()
         Base.metadata.create_all(engine)
         sessions = sessionmaker(bind=engine)
         with sessions() as db:

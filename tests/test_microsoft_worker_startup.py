@@ -4,7 +4,8 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import inspect, text
+from ephemeral_postgres import postgres_test_db
 from sqlalchemy.orm import sessionmaker
 
 from app import database, models, notifications
@@ -29,8 +30,8 @@ def test_worker_migrates_microsoft_schema_before_queries(monkeypatch):
     ]
 
 
-def test_worker_migrates_legacy_schema_and_processes_mail_without_microsoft(monkeypatch, tmp_path):
-    engine = create_engine(f'sqlite:///{tmp_path / "worker.sqlite"}')
+def test_worker_migrates_legacy_schema_and_processes_mail_without_microsoft(monkeypatch, postgres_test_db):
+    engine = postgres_test_db.engine
     factory = sessionmaker(bind=engine, autoflush=False)
     database.Base.metadata.create_all(engine)
     with engine.begin() as conn:
@@ -125,11 +126,11 @@ def test_teams_exception_is_isolated_and_sanitized(monkeypatch, caplog):
 
 
 @pytest.mark.parametrize('failure', ['reconnect', 'graph'])
-def test_teams_failure_persists_retry_after_mail(monkeypatch, failure):
+def test_teams_failure_persists_retry_after_mail(monkeypatch, failure, postgres_test_db):
     from app.teams_models import TeamsSyncJob
     from app.teams_sync import enqueue_booking
     from app.microsoft_refresh import MicrosoftReconnectRequired
-    engine = create_engine('sqlite://')
+    engine = postgres_test_db.engine
     database.Base.metadata.create_all(engine)
     factory = sessionmaker(bind=engine)
     booking = SimpleNamespace(id=42, starts_at=datetime(2026, 1, 1, 12, tzinfo=timezone.utc),

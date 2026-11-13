@@ -8,7 +8,8 @@ import httpx
 import pytest
 from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, select
+from sqlalchemy import select
+from ephemeral_postgres import postgres_test_db
 from sqlalchemy.orm import sessionmaker
 
 from app import models, notification_worker as worker
@@ -20,10 +21,8 @@ from app.teams_models import TeamsSyncJob, utcnow
 
 
 @pytest.fixture
-def engine(tmp_path):
-    db = create_engine('sqlite:///' + str(tmp_path / 'e2e.db'), connect_args={'check_same_thread': False})
-    yield db
-    db.dispose()
+def engine(postgres_test_db):
+    return postgres_test_db.engine
 
 
 @pytest.fixture

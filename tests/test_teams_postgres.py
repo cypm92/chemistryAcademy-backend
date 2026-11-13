@@ -1,42 +1,30 @@
-"""Concurrency tests require an explicitly provided disposable PostgreSQL database."""
+"""Concurrency tests against a dedicated ephemeral PostgreSQL database."""
 from teams_identity_fixtures import IDENTITY, seed_account, seed_identified_event
-import os
+
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import httpx
 import pytest
-from sqlalchemy import create_engine, select, text
-from uuid import uuid4
+from sqlalchemy import select, text
+from sqlalchemy.orm import sessionmaker
+from ephemeral_postgres import postgres_test_db
 from app.database import Base
 from app import models
-from sqlalchemy.orm import sessionmaker
+
 
 from app.teams_models import TeamsSyncJob
 from app.teams_sync import enqueue_booking, process_pending
 
 
 @pytest.fixture
-def sessions():
-    url = os.environ.get('TEAMS_TEST_POSTGRES_URL')
-    if not url:
-        pytest.skip('TEAMS_TEST_POSTGRES_URL must name an isolated test database')
-    if not url.startswith(('postgresql://', 'postgresql+psycopg2://')):
-        pytest.fail('PostgreSQL required')
-    admin = create_engine(url)
-    schema = 'teams_test_' + uuid4().hex
-    with admin.begin() as conn:
-        conn.execute(text(f'CREATE SCHEMA {schema}'))
-    engine = create_engine(url, connect_args={'options': f'-csearch_path={schema}'})
+def sessions(postgres_test_db):
+    engine = postgres_test_db.engine
     Base.metadata.create_all(engine)
     factory = sessionmaker(engine)
     with factory.begin() as db:
         seed_account(db)
     yield factory
-    engine.dispose()
-    with admin.begin() as conn:
-        conn.execute(text(f'DROP SCHEMA {schema} CASCADE'))
-    admin.dispose()
 
 
 def test_create_without_join_url_remains_pending(sessions):

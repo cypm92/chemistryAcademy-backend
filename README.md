@@ -12,6 +12,54 @@ accesos individuales y fecha de caducidad.
 - Descarga bloqueada por defecto y habilitable por material y usuario.
 - SQLite y archivos locales para desarrollo; PostgreSQL y un bucket privado para producción.
 
+## Pruebas de backend
+
+Las pruebas de aplicación requieren PostgreSQL aislado; no usan la base del
+Compose ni aceptan una `DATABASE_URL` arbitraria. Instala las dependencias de
+`requirements-test.txt`, inicia Docker y descarga la imagen antes de ejecutarlas:
+
+```sh
+docker pull postgres:16-alpine
+python -m pytest tests/test_env_ignore.py tests/test_ephemeral_postgres.py -q
+python tests/run_ephemeral_material_tests.py -q
+python tests/run_remaining_postgres_tests.py -q
+```
+
+Los ejecutores crean servidores temporales con almacenamiento efímero y los
+eliminan al terminar; el primero ejecuta los casos que necesitan Docker en el
+host y puede tardar más de 50 minutos. No ejecutes la batería apuntando a una
+base de aplicación o de producción. La comprobación de CI conserva su red
+Docker interna creada para esa ejecución y valida la identidad del servidor de
+pruebas tras conectar; las comprobaciones de rutas y direcciones privadas por
+sí solas no acreditan el aislamiento de esa red.
+
+CI reparte los archivos del ejecutor de host en dos procesos independientes,
+cada uno con su propio servidor de arranque y un informe JUnit separado. Esta
+paralelización aumenta el uso simultáneo de recursos; su duración en GitHub
+Actions aún no se ha medido. El registro de identidad de proceso está
+implementado actualmente para Windows y Linux: en otros sistemas la creación
+del servidor de pruebas se rechaza por seguridad.
+
+Los registros de propiedad sin credenciales se guardan en
+`~/.cache/beciencia-pytest-containers/` (o en `BECIENCIA_PYTEST_REGISTRY`).
+Si se configura `BECIENCIA_PYTEST_REGISTRY`, su ruta debe ser absoluta y estar
+en almacenamiento persistente, no en un directorio temporal que se elimine: una
+ruta absoluta por sí sola no garantiza durabilidad. En Windows debe incluir
+unidad (por ejemplo `C:/ruta/registros`); `/tmp/registros` no es absoluta allí.
+Una ruta relativa se rechaza antes de iniciar Docker. Las pruebas de interrupción
+utilizan además `~/.cache/beciencia-pytest-integration/<id>/`: si no pueden
+recuperar el contenedor, conservan allí su registro para inspección manual.
+Si se interrumpe una ejecución, revisa el registro antes de recuperar **solo**
+su contenedor con `python tests/recover_ephemeral_postgres.py <registro.json>`.
+La herramienta conserva registros mientras el PID registrado esté activo o no
+se pueda comprobar; incluso si el PID se ha reutilizado, no detiene el recurso.
+La guarda de arranque contrasta la identidad de nacimiento. No se atribuyen ni
+eliminan contenedores sin registro.
+Antes de crear el contenedor se registra su token y propietario. Si la creación
+se interrumpe antes de guardar el ID, la recuperación busca el nombre exacto
+derivado del token y contrasta la etiqueta; si no lo encuentra o aún no está
+en ejecución, conserva el registro para evitar perder la atribución.
+
 ## Arranque rápido
 
 ### Entorno local con imágenes de aplicación compiladas

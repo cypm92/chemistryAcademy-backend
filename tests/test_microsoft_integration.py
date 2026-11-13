@@ -1,3 +1,4 @@
+from ephemeral_postgres import postgres_test_db
 from fastapi.testclient import TestClient
 
 
@@ -29,12 +30,11 @@ def test_class_response_exposes_disabled_teams_state(monkeypatch):
     assert ClassOut.model_validate(class_data(booking)).model_dump()["teams_status"] == "not_configured"
 
 
-def test_full_app_oauth_flow_and_permissions(monkeypatch, tmp_path):
-    import os
+def test_full_app_oauth_flow_and_permissions(monkeypatch, postgres_test_db):
     from urllib.parse import parse_qs, urlparse
     import httpx
     from cryptography.fernet import Fernet
-    from sqlalchemy import create_engine, inspect, text
+    from sqlalchemy import inspect, text
     from sqlalchemy.orm import sessionmaker
     from app.database import Base, get_db
     from app.main import app
@@ -45,8 +45,7 @@ def test_full_app_oauth_flow_and_permissions(monkeypatch, tmp_path):
 
     for key, value in {"MICROSOFT_TENANT_ID": "11111111-1111-4111-8111-111111111111", "MICROSOFT_CLIENT_ID": "22222222-2222-4222-8222-222222222222", "MICROSOFT_CLIENT_SECRET": "fake", "MICROSOFT_REDIRECT_URI": "https://example.test/api/integrations/microsoft/callback", "MICROSOFT_FERNET_KEY": Fernet.generate_key().decode()}.items():
         monkeypatch.setenv(key, value)
-    url = os.environ.get("INTEGRATION_TEST_POSTGRES_URL") or "sqlite:///" + str(tmp_path / "legacy.db")
-    engine = create_engine(url, connect_args={"check_same_thread": False} if url.startswith("sqlite") else {})
+    engine = postgres_test_db.engine
     # Simulate an existing installation, not a fresh metadata-only database.
     with engine.begin() as conn:
         conn.execute(text("CREATE TABLE legacy_marker (id INTEGER PRIMARY KEY)"))
