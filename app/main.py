@@ -512,8 +512,8 @@ def ensure_weekday_booking(starts_at: datetime, ends_at: datetime) -> None:
 def ensure_class_hours(starts_at: datetime, ends_at: datetime) -> None:
     madrid = ZoneInfo("Europe/Madrid")
     local_start, local_end = starts_at.astimezone(madrid), ends_at.astimezone(madrid)
-    if local_start.date() != local_end.date() or (local_end.hour, local_end.minute, local_end.second, local_end.microsecond) > (21, 0, 0, 0):
-        raise HTTPException(400, "La clase debe terminar el mismo día, como máximo a las 21:00 (hora de Madrid)")
+    if local_start.date() != local_end.date() or (local_end.hour, local_end.minute, local_end.second, local_end.microsecond) > (22, 0, 0, 0):
+        raise HTTPException(400, "La clase debe terminar el mismo día, como máximo a las 22:00 (hora de Madrid)")
 
 
 def lock_booking_schedule(db: Session) -> None:
