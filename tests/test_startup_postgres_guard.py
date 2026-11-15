@@ -1,5 +1,6 @@
 """Check startup destination attestation against a real isolated container."""
 import json
+from pathlib import Path
 import startup_postgres_guard
 from ephemeral_postgres import ephemeral_postgres, postgres_test_db
 from recover_ephemeral_postgres import registry_path
@@ -10,10 +11,45 @@ def adjacent_port(port):
     return port - 1 if port == 65535 else port + 1
 
 
+def own_record(container_id):
+    for path in registry_path().glob('*.json'):
+        try:
+            record = json.loads(path.read_text(encoding='utf-8'))
+        except (FileNotFoundError, json.JSONDecodeError):
+            continue
+        if record.get('container_id') == container_id:
+            return record
+    raise AssertionError('No ownership record found for the test container')
+
+
+def test_guard_test_handles_record_removed_during_shared_registry_scan(postgres_test_db, tmp_path, monkeypatch):
+    shared = registry_path()
+    vanished = tmp_path / 'vanished.json'
+    vanished.write_text('{}', encoding='utf-8')
+    original_glob = Path.glob
+
+    def glob_with_disappearing_record(path, pattern, *args, **kwargs):
+        paths = list(original_glob(path, pattern, *args, **kwargs))
+        if path == shared and pattern == '*.json':
+            yield vanished
+            yield from paths
+        else:
+            yield from paths
+
+    original_read_text = Path.read_text
+
+    def read_after_removal(path, *args, **kwargs):
+        if path == vanished:
+            vanished.unlink(missing_ok=True)
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, 'glob', glob_with_disappearing_record)
+    monkeypatch.setattr(Path, 'read_text', read_after_removal)
+    test_startup_guard_checks_container_endpoint_and_disallows_url_overrides(postgres_test_db, tmp_path, monkeypatch)
+
+
 def test_endpoint_check_survives_adjacent_registered_container(postgres_test_db, tmp_path, monkeypatch):
-    registry = registry_path()
-    records = [json.loads(path.read_text(encoding='utf-8')) for path in registry.glob('*.json')]
-    own = next(record for record in records if record['container_id'] == postgres_test_db.container_id)
+    own = own_record(postgres_test_db.container_id)
     second = {**own, 'container_id': 'a' * 64, 'run_token': 'b' * 32}
     (tmp_path / 'own.json').write_text(json.dumps(own), encoding='utf-8')
     (tmp_path / 'second.json').write_text(json.dumps(second), encoding='utf-8')
@@ -51,8 +87,7 @@ def test_endpoint_check_with_two_real_live_containers(postgres_test_db, tmp_path
 
 
 def test_startup_guard_checks_container_endpoint_and_disallows_url_overrides(postgres_test_db, tmp_path, monkeypatch):
-    records = [json.loads(path.read_text(encoding='utf-8')) for path in registry_path().glob('*.json')]
-    own = next(record for record in records if record['container_id'] == postgres_test_db.container_id)
+    own = own_record(postgres_test_db.container_id)
     (tmp_path / 'own.json').write_text(json.dumps(own), encoding='utf-8')
     monkeypatch.setenv('BECIENCIA_PYTEST_REGISTRY', str(tmp_path))
     url = postgres_test_db.engine.url
@@ -64,9 +99,7 @@ def test_startup_guard_checks_container_endpoint_and_disallows_url_overrides(pos
 
 
 def test_startup_guard_rejects_wrong_label_and_dead_owner(postgres_test_db, tmp_path, monkeypatch):
-    registry = registry_path()
-    records = [json.loads(p.read_text(encoding='utf-8')) for p in registry.glob('*.json')]
-    record = next(r for r in records if r['container_id'] == postgres_test_db.container_id)
+    record = own_record(postgres_test_db.container_id)
     target = tmp_path / 'record.json'
     monkeypatch.setenv('BECIENCIA_PYTEST_REGISTRY', str(tmp_path))
     url = postgres_test_db.engine.url.render_as_string(hide_password=False)

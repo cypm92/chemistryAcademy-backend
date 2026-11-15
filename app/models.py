@@ -159,6 +159,13 @@ class TagAccessGrant(Base):
     tag: Mapped[Tag] = relationship()
 
 
+class MaterialOrder(Base):
+    __tablename__ = "material_order"
+
+    material_id: Mapped[int] = mapped_column(ForeignKey("materials.id", ondelete="CASCADE"), primary_key=True)
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
 class MaterialFavorite(Base):
     __tablename__ = "material_favorites"
     __table_args__ = (UniqueConstraint("user_id", "material_id", name="uq_user_favorite_material"),)
