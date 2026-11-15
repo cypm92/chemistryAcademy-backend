@@ -2,7 +2,7 @@
 
 ## Alcance y flujo de trabajo
 - Este repositorio contiene el backend Python/FastAPI. Mantén los cambios dentro de este repositorio, salvo que el usuario solicite explícitamente coordinar cambios en otros.
-- Trabaja en la rama actual. No cambies de rama, crees commits, hagas push o merge, publiques imágenes ni despliegues sin autorización expresa del usuario.
+- Trabaja en la rama actual; cambiar de rama requiere autorización. Para una feature acordada y validada localmente, DEC-006 autoriza de forma permanente commits, push a `develop` y apertura de PR hacia `main`, sin pedir permiso por cada paso; comprueba destinos, automatizaciones y cambios ajenos. No hagas merge ni despliegues sin autorización expresa; el usuario realiza el merge o autoriza esa operación. Publicar imágenes o hacer push a `main` requiere autorización expresa. Respeta confirmaciones reales y reglas superiores.
 - Antes de editar, revisa `git status`. Conserva todos los cambios existentes del usuario; nunca hagas reset, limpieza ni sobrescrituras.
 - Para funcionalidades que afecten a varios repositorios, acuerda el contrato de API y los criterios de aceptación antes de implementar. Mantén los cambios acotados y explica las dependencias entre repositorios.
 

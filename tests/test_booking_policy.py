@@ -47,10 +47,10 @@ class BookingPolicyTest(unittest.TestCase):
     @patch('app.main.datetime', PolicyDatetime)
     def test_class_end_limit_all_endpoints_and_rejection_is_atomic(self):
         cases = [
-            ('2030-01-02T19:00:00+00:00', 201),  # 21:00 Madrid
-            ('2030-01-02T19:30:00+00:00', 400),  # 21:30
-            ('2030-07-02T18:00:00+00:00', 201),
-            ('2030-07-02T18:30:00+00:00', 400),
+            ('2030-01-02T20:00:00+00:00', 201),  # ends 22:00 Madrid (winter)
+            ('2030-01-02T20:30:00+00:00', 400),  # ends 22:30
+            ('2030-07-02T19:00:00+00:00', 201),  # ends 22:00 Madrid (summer)
+            ('2030-07-02T19:30:00+00:00', 400),  # ends 22:30
             ('2030-01-02T22:30:00+00:00', 400),
         ]
         for endpoint in ('student', 'guest', 'admin_create', 'admin_edit'):
@@ -93,7 +93,7 @@ class BookingPolicyTest(unittest.TestCase):
             self.assertTrue(events)
         with patch('app.notifications._send') as send:
             response = self.client.patch(f'/admin/classes/{booking_id}', headers=self.headers(self.admin), json={
-                'subject': 'Física ESO', 'starts_at': '2030-01-02T19:30:00+00:00', 'duration_slots': 2})
+                'subject': 'Física ESO', 'starts_at': '2030-01-02T20:30:00+00:00', 'duration_slots': 2})
             self.assertEqual(response.status_code, 400, response.text)
             send.assert_not_called()
         with self.sessions() as db:
