@@ -89,6 +89,20 @@ class TagGrantCreate(BaseModel):
     can_download: bool = False
 
 
+class TagGrantOut(BaseModel):
+    id: int
+    user_id: int
+    tag: TagOut
+    starts_at: datetime
+    expires_at: datetime
+    can_download: bool
+    model_config = ConfigDict(from_attributes=True)
+
+
+class TagGrantUpdate(GrantUpdate):
+    grant_id: int
+
+
 class GrantWithUserOut(GrantOut):
     user: UserOut
 

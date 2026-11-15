@@ -80,6 +80,121 @@ def visible(s, user):
     return {item['id'] for item in response.json()}
 
 
+def test_move_material_one_position_is_persistent_and_visible_to_students(setup):
+    client, sessions, _, ids = setup
+    with sessions.begin() as db:
+        other = db.get(models.Material, ids['other'])
+        other.folder_id = ids['folder']
+        other.tag_links.append(models.MaterialTag(tag_id=ids['old']))
+    def order(user):
+        path = '/admin/materials' if user == 'admin' else '/materials'
+        response = client.get(path, headers=auth(ids[user]))
+        assert response.status_code == 200
+        return [row['id'] for row in response.json() if row['id'] in (ids['material'], ids['other'])]
+    original = order('admin')
+    assert order('old_user') == original
+    response = client.post(f"/admin/materials/{original[1]}/order", json={'direction': 'up'}, headers=auth(ids['admin']))
+    assert response.status_code == 204
+    assert order('admin') == original[::-1]
+    assert order('old_user') == original[::-1]
+
+
+def test_moving_ordered_material_to_another_folder_resets_its_old_position(setup):
+    client, sessions, _, ids = setup
+    with sessions.begin() as db:
+        other = db.get(models.Material, ids['other'])
+        other.folder_id = ids['folder']
+        destination = models.Folder(name='Destination')
+        db.add(destination); db.flush(); destination_id = destination.id
+    ordered = client.get('/admin/materials', headers=auth(ids['admin'])).json()
+    source = [m['id'] for m in ordered if m['id'] in (ids['material'], ids['other'])]
+    assert client.post(f"/admin/materials/{source[1]}/order", json={'direction': 'up'}, headers=auth(ids['admin'])).status_code == 204
+    assert client.patch(f"/admin/materials/{source[1]}/folder", json={'folder_id': destination_id}, headers=auth(ids['admin'])).status_code == 200
+    with sessions() as db:
+        assert db.get(models.MaterialOrder, source[1]) is None
+
+
+def test_two_concurrent_reorders_move_the_file_two_positions(setup):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+    client, sessions, _, ids = setup
+    with sessions.begin() as db:
+        db.get(models.Material, ids['other']).folder_id = ids['folder']
+        db.add(models.Material(title='Third', folder_id=ids['folder'], kind='pdf', filename='third.pdf',
+                               storage_key='third.pdf', content_type='application/pdf', size_bytes=1))
+    def order():
+        response = client.get('/admin/materials', headers=auth(ids['admin']))
+        return [m['id'] for m in response.json() if m.get('folder') and m['folder']['id'] == ids['folder']]
+    original = order()
+    assert len(original) == 3
+    gate = Barrier(2)
+    def move():
+        gate.wait(timeout=10)
+        return client.post(f"/admin/materials/{original[-1]}/order", json={'direction': 'up'}, headers=auth(ids['admin'])).status_code
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        statuses = list(executor.map(lambda _: move(), range(2)))
+    assert statuses == [204, 204]
+    assert order() == [original[2], original[0], original[1]]
+
+
+def test_move_waits_for_in_flight_reordering(setup):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+    client, sessions, engine, ids = setup
+    with sessions.begin() as db:
+        db.get(models.Material, ids['other']).folder_id = ids['folder']
+        destination = models.Folder(name='Destination')
+        db.add(destination); db.flush(); destination_id = destination.id
+    rows = client.get('/admin/materials', headers=auth(ids['admin'])).json()
+    original = [m['id'] for m in rows if m.get('folder') and m['folder']['id'] == ids['folder']]
+    locked, release = Event(), Event()
+    def pause_lock(_conn, _cursor, statement, _parameters, _context, _many):
+        sql = statement.lower()
+        if 'from folders' in sql and 'for update' in sql and not locked.is_set():
+            locked.set()
+            assert release.wait(10)
+    event.listen(engine, 'after_cursor_execute', pause_lock)
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            reorder = executor.submit(lambda: client.post(f'/admin/materials/{original[-1]}/order', json={'direction': 'up'}, headers=auth(ids['admin'])).status_code)
+            assert locked.wait(10)
+            move = executor.submit(lambda: client.patch(f'/admin/materials/{original[-1]}/folder', json={'folder_id': destination_id}, headers=auth(ids['admin'])).status_code)
+            try:
+                move.result(timeout=0.5)
+            except TimeoutError:
+                pass
+            release.set()
+            assert reorder.result(timeout=10) == 204
+            assert move.result(timeout=10) == 200
+    finally:
+        release.set()
+        event.remove(engine, 'after_cursor_execute', pause_lock)
+    with sessions() as db:
+        assert db.get(models.Material, original[-1]).folder_id == destination_id
+
+
+def test_uncategorized_simultaneous_reorders_preserve_both_moves(setup):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+    client, sessions, _, ids = setup
+    with sessions.begin() as db:
+        db.get(models.Material, ids['material']).folder_id = None
+        db.add(models.Material(title='Third', kind='pdf', filename='third.pdf', storage_key='third.pdf', content_type='application/pdf', size_bytes=1))
+    def order():
+        rows = client.get('/admin/materials', headers=auth(ids['admin'])).json()
+        return [m['id'] for m in rows if not m.get('folder')]
+    original = order()
+    assert len(original) == 3
+    gate = Barrier(2)
+    def move():
+        gate.wait(timeout=10)
+        return client.post(f"/admin/materials/{original[-1]}/order", json={'direction': 'up'}, headers=auth(ids['admin'])).status_code
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        statuses = list(executor.map(lambda _: move(), range(2)))
+    assert statuses == [204, 204]
+    assert order() == [original[2], original[0], original[1]]
+
+
 def test_admin_sharing_includes_direct_and_tag_access_once(setup):
     client, sessions, _, ids = setup
     with sessions.begin() as db:

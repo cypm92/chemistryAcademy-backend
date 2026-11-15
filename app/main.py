@@ -5,12 +5,14 @@ import json
 import re
 from urllib.parse import quote, urlsplit
 from pathlib import Path
+from typing import NamedTuple
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from sqlalchemy import delete, inspect, select, text
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session, joinedload, selectinload
 
 from . import models, schemas
 from . import microsoft_oauth_routes
@@ -1102,6 +1104,34 @@ def users(_: models.User = Depends(admin_user), db: Session = Depends(get_db)):
     return list(db.scalars(select(models.User).order_by(models.User.created_at.desc())))
 
 
+@app.get("/admin/users/access-summary")
+def user_access_summary(_: models.User = Depends(admin_user), db: Session = Depends(get_db)):
+    now = datetime.now(timezone.utc)
+    students = db.execute(select(models.User.id, models.User.is_active).where(models.User.role == 'guest')).all()
+    summaries = {user_id: {'user_id': user_id, 'tags': [], 'file_count': 0} for user_id, _ in students}
+    active_users = {user_id for user_id, active in students if active}
+    file_ids = {user_id: set() for user_id in summaries}
+    tags = db.execute(select(models.TagAccessGrant.user_id, models.Tag.id, models.Tag.name).join(
+        models.Tag, models.Tag.id == models.TagAccessGrant.tag_id
+    ).where(models.TagAccessGrant.starts_at <= now, models.TagAccessGrant.expires_at > now).order_by(models.Tag.name, models.Tag.id)).all()
+    for user_id, tag_id, name in tags:
+        if user_id in summaries:
+            summaries[user_id]['tags'].append({'id': tag_id, 'name': name})
+    direct = db.execute(select(models.AccessGrant.user_id, models.AccessGrant.material_id).join(
+        models.Material, models.Material.id == models.AccessGrant.material_id
+    ).where(models.Material.is_class_attachment.is_(False), models.AccessGrant.starts_at <= now, models.AccessGrant.expires_at > now)).all()
+    via_tags = db.execute(select(models.TagAccessGrant.user_id, models.MaterialTag.material_id).join(
+        models.MaterialTag, models.MaterialTag.tag_id == models.TagAccessGrant.tag_id
+    ).join(models.Material, models.Material.id == models.MaterialTag.material_id).where(
+        models.Material.is_class_attachment.is_(False), models.TagAccessGrant.starts_at <= now, models.TagAccessGrant.expires_at > now)).all()
+    for user_id, material_id in [*direct, *via_tags]:
+        if user_id in active_users:
+            file_ids[user_id].add(material_id)
+    for user_id, ids in file_ids.items():
+        summaries[user_id]['file_count'] = len(ids)
+    return list(summaries.values())
+
+
 @app.post("/admin/users", response_model=schemas.UserOut, status_code=201)
 def create_user(data: schemas.AdminUserCreate, _: models.User = Depends(admin_user), db: Session = Depends(get_db)):
     if data.role not in {"guest", "admin"}:
@@ -1123,6 +1153,8 @@ def update_user(user_id: int, data: schemas.AdminUserUpdate, admin: models.User 
     old_name = user.name
     if "role" in changes and changes["role"] not in {"guest", "admin"}:
         raise HTTPException(400, "Rol no válido")
+    if "role" in changes and changes["role"] != user.role:
+        raise HTTPException(400, "No se puede cambiar el rol de una cuenta")
     if "email" in changes:
         email = changes["email"].lower()
         duplicate = db.scalar(select(models.User).where(models.User.email == email, models.User.id != user_id))
@@ -1261,22 +1293,29 @@ def resolve_material_tags(db: Session, names: list[str], *, current: list[models
     return resolved
 
 
-def active_material_grant(material_id: int, user_id: int, now: datetime, db: Session) -> models.AccessGrant | models.TagAccessGrant | None:
+class EffectiveMaterialGrant(NamedTuple):
+    expires_at: datetime
+    can_download: bool
+
+
+def active_material_grant(material_id: int, user_id: int, now: datetime, db: Session) -> EffectiveMaterialGrant | None:
     direct = db.scalar(select(models.AccessGrant).where(
         models.AccessGrant.user_id == user_id, models.AccessGrant.material_id == material_id,
         models.AccessGrant.starts_at <= now, models.AccessGrant.expires_at > now,
     ))
-    tag_grant = db.scalar(select(models.TagAccessGrant).join(
+    tag_grants = db.scalars(select(models.TagAccessGrant).join(
         models.MaterialTag, models.MaterialTag.tag_id == models.TagAccessGrant.tag_id,
     ).where(
         models.MaterialTag.material_id == material_id,
         models.TagAccessGrant.user_id == user_id,
         models.TagAccessGrant.tag_id == models.MaterialTag.tag_id,
         models.TagAccessGrant.starts_at <= now, models.TagAccessGrant.expires_at > now,
-    ).order_by(models.TagAccessGrant.expires_at.desc()))
-    if direct and tag_grant:
-        return direct if aware(direct.expires_at) >= aware(tag_grant.expires_at) else tag_grant
-    return direct or tag_grant
+    )).all()
+    grants = ([direct] if direct else []) + list(tag_grants)
+    if not grants:
+        return None
+    return EffectiveMaterialGrant(expires_at=max((grant.expires_at for grant in grants), key=aware),
+                                  can_download=any(grant.can_download for grant in grants))
 
 
 @app.get("/admin/users/{user_id}/material-access", response_model=list[schemas.SharingByMaterialOut])
@@ -1387,7 +1426,7 @@ def delete_folder(folder_id: int, _: models.User = Depends(admin_user), db: Sess
 @app.get("/admin/materials", response_model=list[schemas.AdminMaterialOut])
 def all_materials(user: models.User = Depends(admin_user), db: Session = Depends(get_db)):
     now = datetime.now(timezone.utc)
-    materials = list(db.scalars(select(models.Material).where(models.Material.is_class_attachment.is_(False)).order_by(models.Material.created_at.desc())))
+    materials = list(db.scalars(ordered_materials_query()))
     favorite_ids = set(db.scalars(select(models.MaterialFavorite.material_id).where(models.MaterialFavorite.user_id == user.id)))
     direct = db.scalars(select(models.AccessGrant).options(joinedload(models.AccessGrant.user)).where(
         models.AccessGrant.starts_at <= now, models.AccessGrant.expires_at > now,
@@ -1520,6 +1559,20 @@ def move_material(material_id: int, data: schemas.MaterialMove, _: models.User =
     folder = db.get(models.Folder, data.folder_id)
     if not folder:
         raise HTTPException(404, "La carpeta seleccionada no existe")
+    source_id = material.folder_id
+    default_id = db.scalar(select(models.Folder.id).where(models.Folder.name == 'Sin clasificar', models.Folder.parent_id.is_(None)))
+    if (source_id is None or source_id == default_id or folder.id == default_id) and db.get_bind().dialect.name == 'postgresql':
+        db.execute(text('SELECT pg_advisory_xact_lock(7415928163043)'))
+    folder_ids = sorted({value for value in (source_id, folder.id) if value is not None})
+    for folder_id in folder_ids:
+        db.scalar(select(models.Folder).where(models.Folder.id == folder_id).with_for_update())
+    material = db.scalar(select(models.Material).where(models.Material.id == material_id).execution_options(populate_existing=True))
+    if not material:
+        raise HTTPException(404, "Material no encontrado")
+    if material.folder_id != source_id:
+        raise HTTPException(409, "El material se ha movido; actualiza la biblioteca y vuelve a intentarlo")
+    if material.folder_id != folder.id:
+        db.execute(delete(models.MaterialOrder).where(models.MaterialOrder.material_id == material.id))
     material.folder = folder
     db.commit(); db.refresh(material)
     return material_data(material)
@@ -1530,8 +1583,20 @@ def delete_material(material_id: int, _: models.User = Depends(admin_user), db: 
     material = db.get(models.Material, material_id)
     if not material:
         raise HTTPException(404, "Material no encontrado")
+    folder_id = material.folder_id
+    default_id = db.scalar(select(models.Folder.id).where(models.Folder.name == 'Sin clasificar', models.Folder.parent_id.is_(None)))
+    if (folder_id is None or folder_id == default_id) and db.get_bind().dialect.name == 'postgresql':
+        db.execute(text('SELECT pg_advisory_xact_lock(7415928163043)'))
+    if folder_id is not None:
+        db.scalar(select(models.Folder).where(models.Folder.id == folder_id).with_for_update())
+    material = db.scalar(select(models.Material).where(models.Material.id == material_id).execution_options(populate_existing=True))
+    if not material:
+        raise HTTPException(404, "Material no encontrado")
+    if material.folder_id != folder_id:
+        raise HTTPException(409, "El material se ha movido; actualiza la biblioteca y vuelve a intentarlo")
     storage_key = material.storage_key
     db.execute(delete(models.AccessGrant).where(models.AccessGrant.material_id == material_id))
+    db.execute(delete(models.MaterialOrder).where(models.MaterialOrder.material_id == material_id))
     db.delete(material)
     db.commit()
     storage.delete(storage_key)
@@ -1539,7 +1604,7 @@ def delete_material(material_id: int, _: models.User = Depends(admin_user), db: 
 
 @app.post("/admin/grants", response_model=schemas.GrantOut)
 def grant_access(data: schemas.GrantCreate, _: models.User = Depends(admin_user), db: Session = Depends(get_db)):
-    if not db.get(models.User, data.user_id) or not db.get(models.Material, data.material_id):
+    if not db.scalar(select(models.User).where(models.User.id == data.user_id).with_for_update()) or not db.get(models.Material, data.material_id):
         raise HTTPException(404, "Usuario o material no encontrado")
     starts = data.starts_at or datetime.now(timezone.utc)
     if aware(data.expires_at) <= aware(starts):
@@ -1556,9 +1621,51 @@ def grant_access(data: schemas.GrantCreate, _: models.User = Depends(admin_user)
     return grant
 
 
+def ordered_materials_query():
+    return (select(models.Material).outerjoin(models.MaterialOrder, models.MaterialOrder.material_id == models.Material.id)
+        .where(models.Material.is_class_attachment.is_(False))
+        .order_by(models.MaterialOrder.position.desc().nulls_first(), models.Material.created_at.desc(), models.Material.id.desc()))
+
+
+@app.post("/admin/materials/{material_id}/order", status_code=204)
+def reorder_material(material_id: int, data: dict, _: models.User = Depends(admin_user), db: Session = Depends(get_db)):
+    direction = data.get('direction')
+    if direction not in ('up', 'down'):
+        raise HTTPException(400, 'Dirección inválida')
+    material = db.get(models.Material, material_id)
+    if not material or material.is_class_attachment:
+        raise HTTPException(404, 'Material no encontrado')
+    folder_id = material.folder_id
+    default_id = db.scalar(select(models.Folder.id).where(models.Folder.name == 'Sin clasificar', models.Folder.parent_id.is_(None)))
+    unclassified = folder_id is None or (default_id is not None and folder_id == default_id)
+    if unclassified and db.get_bind().dialect.name == 'postgresql':
+        db.execute(text('SELECT pg_advisory_xact_lock(7415928163043)'))
+    if folder_id is not None:
+        db.scalar(select(models.Folder).where(models.Folder.id == folder_id).with_for_update())
+    material = db.scalar(select(models.Material).where(models.Material.id == material_id).execution_options(populate_existing=True))
+    if not material:
+        raise HTTPException(404, 'Material no encontrado')
+    if material.folder_id != folder_id:
+        raise HTTPException(409, 'El material se ha movido; actualiza la biblioteca y vuelve a intentarlo')
+    condition = (models.Material.folder_id.is_(None) | (models.Material.folder_id == default_id)) if unclassified else models.Material.folder_id == folder_id
+    rows = list(db.scalars(ordered_materials_query().where(condition)))
+    index = next(i for i, row in enumerate(rows) if row.id == material_id)
+    target = index + (-1 if direction == 'up' else 1)
+    if target < 0 or target >= len(rows):
+        raise HTTPException(400, 'El material ya está en el extremo de la carpeta')
+    rows[index], rows[target] = rows[target], rows[index]
+    existing = {row.material_id: row for row in db.scalars(select(models.MaterialOrder).where(models.MaterialOrder.material_id.in_([m.id for m in rows])))}
+    for position, row in enumerate(reversed(rows), 1):
+        if row.id in existing:
+            existing[row.id].position = position
+        else:
+            db.add(models.MaterialOrder(material_id=row.id, position=position))
+    db.commit()
+
+
 @app.post("/admin/tag-grants", response_model=schemas.GrantOut)
 def grant_tag_access(data: schemas.TagGrantCreate, _: models.User = Depends(admin_user), db: Session = Depends(get_db)):
-    if not db.get(models.User, data.user_id) or not db.get(models.Tag, data.tag_id):
+    if not db.scalar(select(models.User.id).where(models.User.id == data.user_id).with_for_update()) or not db.get(models.Tag, data.tag_id):
         raise HTTPException(404, "Usuario o etiqueta no encontrados")
     starts = data.starts_at or datetime.now(timezone.utc)
     if aware(data.expires_at) <= aware(starts):
@@ -1577,12 +1684,53 @@ def grant_tag_access(data: schemas.TagGrantCreate, _: models.User = Depends(admi
             "expires_at": grant.expires_at, "can_download": grant.can_download}
 
 
+@app.get("/admin/users/{user_id}/tag-grants", response_model=list[schemas.TagGrantOut])
+def user_tag_grants(user_id: int, _: models.User = Depends(admin_user), db: Session = Depends(get_db)):
+    if not db.get(models.User, user_id):
+        raise HTTPException(404, "Usuario no encontrado")
+    return db.scalars(select(models.TagAccessGrant).options(joinedload(models.TagAccessGrant.tag)).where(
+        models.TagAccessGrant.user_id == user_id).order_by(models.TagAccessGrant.id)).all()
+
+
+@app.patch("/admin/users/{user_id}/tag-grants/{tag_id}", response_model=schemas.TagGrantOut)
+def update_user_tag_grant(user_id: int, tag_id: int, data: schemas.TagGrantUpdate, _: models.User = Depends(admin_user), db: Session = Depends(get_db)):
+    if not db.scalar(select(models.User.id).where(models.User.id == user_id).with_for_update()):
+        raise HTTPException(404, "Usuario no encontrado")
+    grant = db.scalar(select(models.TagAccessGrant).where(
+        models.TagAccessGrant.user_id == user_id, models.TagAccessGrant.tag_id == tag_id))
+    if not grant:
+        raise HTTPException(404, "Acceso por etiqueta no encontrado")
+    if grant.id != data.grant_id:
+        raise HTTPException(409, "La concesión ha cambiado; actualiza y vuelve a intentarlo")
+    if aware(data.expires_at) <= max(datetime.now(timezone.utc), aware(grant.starts_at)):
+        raise HTTPException(400, "La fecha final debe ser futura y posterior al inicio")
+    grant.expires_at = data.expires_at
+    if data.can_download is not None:
+        grant.can_download = data.can_download
+    db.commit(); db.refresh(grant)
+    return grant
+
+
+@app.delete("/admin/users/{user_id}/tag-grants/{tag_id}", status_code=204)
+def delete_user_tag_grant(user_id: int, tag_id: int, _: models.User = Depends(admin_user), db: Session = Depends(get_db)):
+    if not db.scalar(select(models.User.id).where(models.User.id == user_id).with_for_update()):
+        raise HTTPException(404, "Usuario no encontrado")
+    grant = db.scalar(select(models.TagAccessGrant).where(
+        models.TagAccessGrant.user_id == user_id, models.TagAccessGrant.tag_id == tag_id))
+    if not grant:
+        raise HTTPException(404, "Acceso por etiqueta no encontrado")
+    db.delete(grant)
+    db.commit()
+
+
 @app.patch("/admin/grants/{grant_id}", response_model=schemas.GrantOut)
 def update_grant(grant_id: int, data: schemas.GrantUpdate, _: models.User = Depends(admin_user),
                  db: Session = Depends(get_db)):
     grant = db.get(models.AccessGrant, grant_id)
     if not grant:
         raise HTTPException(404, "Permiso no encontrado")
+    db.scalar(select(models.User).where(models.User.id == grant.user_id).with_for_update())
+
     if aware(data.expires_at) <= datetime.now(timezone.utc):
         raise HTTPException(400, "La nueva fecha debe ser futura")
     grant.expires_at = data.expires_at
@@ -1604,7 +1752,7 @@ def delete_grant(grant_id: int, _: models.User = Depends(admin_user), db: Sessio
 @app.get("/materials", response_model=list[schemas.MaterialOut])
 def my_materials(user: models.User = Depends(current_user), db: Session = Depends(get_db)):
     if user.role == "admin":
-        materials = db.scalars(select(models.Material).where(models.Material.is_class_attachment.is_(False)).order_by(models.Material.created_at.desc())).all()
+        materials = db.scalars(ordered_materials_query()).all()
         favorite_ids = set(db.scalars(select(models.MaterialFavorite.material_id).where(models.MaterialFavorite.user_id == user.id)))
         return [
             {
@@ -1616,20 +1764,36 @@ def my_materials(user: models.User = Depends(current_user), db: Session = Depend
             for material in materials
         ]
     now = datetime.now(timezone.utc)
-    materials = db.scalars(select(models.Material).where(
-        models.Material.is_class_attachment.is_(False)).order_by(models.Material.created_at.desc())).all()
+    materials = db.scalars(ordered_materials_query().options(
+        joinedload(models.Material.folder),
+        selectinload(models.Material.tag_links).joinedload(models.MaterialTag.tag),
+    )).all()
+    # Keep all folders in the identity map while folder paths traverse parents.
+    folders = db.scalars(select(models.Folder)).all()
     favorite_ids = set(db.scalars(select(models.MaterialFavorite.material_id).where(models.MaterialFavorite.user_id == user.id)))
-    favorite_ids = set(db.scalars(select(models.MaterialFavorite.material_id).where(models.MaterialFavorite.user_id == user.id)))
+    direct_grants = db.scalars(select(models.AccessGrant).where(
+        models.AccessGrant.user_id == user.id,
+        models.AccessGrant.starts_at <= now, models.AccessGrant.expires_at > now,
+    )).all()
+    tag_grants = db.execute(select(models.MaterialTag.material_id, models.TagAccessGrant).join(
+        models.TagAccessGrant, models.TagAccessGrant.tag_id == models.MaterialTag.tag_id,
+    ).where(models.TagAccessGrant.user_id == user.id,
+            models.TagAccessGrant.starts_at <= now, models.TagAccessGrant.expires_at > now)).all()
+    grants_by_material: dict[int, list[models.AccessGrant | models.TagAccessGrant]] = {}
+    for grant in direct_grants:
+        grants_by_material.setdefault(grant.material_id, []).append(grant)
+    for material_id, grant in tag_grants:
+        grants_by_material.setdefault(material_id, []).append(grant)
     result = []
     for material in materials:
-        grant = active_material_grant(material.id, user.id, now, db)
-        if grant:
-            result.append({**material_data(material), "expires_at": grant.expires_at,
-                           "can_download": grant.can_download, "is_favorite": material.id in favorite_ids})
+        grants = grants_by_material.get(material.id, [])
+        if grants:
+            result.append({**material_data(material), "expires_at": max((grant.expires_at for grant in grants), key=aware),
+                           "can_download": any(grant.can_download for grant in grants), "is_favorite": material.id in favorite_ids})
     return result
 
 
-def authorized_material(material_id: int, user: models.User, db: Session) -> tuple[models.Material, models.AccessGrant | None]:
+def authorized_material(material_id: int, user: models.User, db: Session) -> tuple[models.Material, EffectiveMaterialGrant | None]:
     material = db.get(models.Material, material_id)
     if not material:
         raise HTTPException(404, "Material no encontrado")
