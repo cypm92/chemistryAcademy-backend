@@ -94,6 +94,21 @@ def ensure_class_attachment_column() -> None:
         connection.execute(text("UPDATE materials SET is_class_attachment = TRUE WHERE id IN (SELECT material_id FROM booking_materials)"))
 
 
+def ensure_pdf_attachment_download_permission() -> None:
+    """Ensure PDF class attachments have can_download=True in AccessGrant.
+    
+    Idempotent: sets can_download=TRUE for all AccessGrants tied to PDF
+    class attachments, only if currently False. Safe to run repeatedly.
+    """
+    with engine.begin() as connection:
+        connection.execute(text(
+            "UPDATE access_grants "
+            "SET can_download = TRUE "
+            "WHERE can_download = FALSE "
+            "AND material_id IN (SELECT id FROM materials WHERE kind = 'pdf' AND is_class_attachment = TRUE)"
+        ))
+
+
 def ensure_folder_color_column() -> None:
     columns = {column["name"] for column in inspect(engine).get_columns("folders")}
     if "color" not in columns:
@@ -155,6 +170,7 @@ async def lifespan(_: FastAPI):
     ensure_class_attachment_column()
     ensure_folder_color_column()
     ensure_app_setting_text_column()
+    ensure_pdf_attachment_download_permission()
     ensure_default_theme()
     seed_admin()
     ensure_default_folder()
@@ -887,7 +903,7 @@ def class_data(booking: models.Booking, job: TeamsSyncJob | None = None, *, stud
         "user_email": booking.user.email if booking.user else booking.guest_email,
         "materials": [
             {"id": link.material.id, "title": link.material.title, "filename": link.material.filename,
-             "kind": link.material.kind}
+             "kind": link.material.kind, "can_download": link.material.kind == "pdf"}
             for link in booking.material_links
         ],
     }
@@ -1060,10 +1076,12 @@ async def upload_class_attachment(booking_id: int, file: UploadFile = File(...),
         models.AccessGrant.user_id == booking.user_id, models.AccessGrant.material_id == material.id))
     if grant:
         grant.expires_at = max(aware(grant.expires_at), shared_until)
+        if kind == "pdf":
+            grant.can_download = True
     else:
         db.add(models.AccessGrant(user_id=booking.user_id, material_id=material.id,
                                   starts_at=datetime.now(timezone.utc), expires_at=shared_until,
-                                  can_download=False))
+                                  can_download=(kind == "pdf")))
     db.commit(); db.refresh(booking)
     return class_data(booking)
 
@@ -1091,10 +1109,12 @@ def attach_material_to_class(booking_id: int, data: schemas.BookingMaterialCreat
     if grant:
         if aware(grant.expires_at) < shared_until:
             grant.expires_at = shared_until
+        if material.kind == "pdf":
+            grant.can_download = True
     else:
         db.add(models.AccessGrant(user_id=booking.user_id, material_id=material.id,
                                   starts_at=datetime.now(timezone.utc), expires_at=shared_until,
-                                  can_download=False))
+                                  can_download=(material.kind == "pdf")))
     db.commit(); db.refresh(booking)
     return class_data(booking)
 

@@ -112,6 +112,7 @@ class SharedMaterialOut(BaseModel):
     title: str
     filename: str
     kind: str
+    can_download: bool = False
 
     model_config = ConfigDict(from_attributes=True)
 
