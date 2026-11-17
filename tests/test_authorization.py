@@ -21,6 +21,7 @@ from app import models
 from app.database import Base, get_db
 from app.main import app
 from app.security import create_token
+from sqlalchemy import select
 
 ENGINE = None
 SESSIONS = None
@@ -311,3 +312,360 @@ class TestMaterialPermissions:
             f"/admin/users/{ids['Viewer']}/grants", headers=_auth(ids["Admin"])
         )
         assert response.status_code == 200, response.text
+
+
+# ---------------------------------------------------------------------------
+# PDF Class Attachments: Download Permissions (t_d84c3a1f)
+# ---------------------------------------------------------------------------
+
+class TestPDFClassAttachments:
+    """Test PDF class attachments grant can_download=True permission.
+    
+    Criteria from t_d84c3a1f:
+    - A student can download a PDF class attachment (criterion 5).
+    - A student cannot download a video class attachment (criterion 5).
+    - If feasible, test the startup migration (criterion 3).
+    """
+
+    def test_pdf_class_attachment_grants_download_via_upload(self, client, ids):
+        """Test POST /admin/classes/{id}/attachments with PDF sets can_download=True."""
+        from datetime import datetime, timedelta, timezone
+        client_instance = client["client"]
+        auth_admin = _auth(ids["Admin"])
+
+        # Create a confirmed booking
+        with SESSIONS() as db:
+            user = db.get(models.User, ids["Viewer"])
+            booking = models.Booking(
+                user_id=ids["Viewer"],
+                starts_at=datetime.now(timezone.utc),
+                ends_at=datetime.now(timezone.utc) + timedelta(hours=1),
+                status="confirmed",
+                note="Test PDF attachment"
+            )
+            db.add(booking)
+            db.commit()
+            booking_id = booking.id
+
+        # Upload PDF to the booking
+        response = client_instance.post(
+            f"/admin/classes/{booking_id}/attachments",
+            headers=auth_admin,
+            data={"title": "Test PDF"},
+            files={"file": ("test.pdf", b"%PDF-1.4\ntest-content", "application/pdf")},
+        )
+        assert response.status_code == 200, response.text
+        result = response.json()
+
+        # Verify material was created and can_download is True in materials list
+        assert len(result["materials"]) == 1
+        material = result["materials"][0]
+        assert material["kind"] == "pdf"
+        assert material["can_download"] is True
+
+        # Verify AccessGrant has can_download=True in database
+        with SESSIONS() as db:
+            grant = db.scalar(
+                select(models.AccessGrant).where(
+                    models.AccessGrant.user_id == ids["Viewer"],
+                    models.AccessGrant.material_id == material["id"]
+                )
+            )
+            assert grant is not None, "AccessGrant should exist"
+            assert grant.can_download is True, "PDF class attachment should have can_download=True"
+
+    def test_pdf_class_attachment_allows_student_download(self, client, ids):
+        """Test that a student can download a PDF class attachment."""
+        from datetime import datetime, timedelta, timezone
+        client_instance = client["client"]
+        auth_admin = _auth(ids["Admin"])
+        auth_student = _auth(ids["Viewer"])
+
+        # Create a confirmed booking
+        with SESSIONS() as db:
+            booking = models.Booking(
+                user_id=ids["Viewer"],
+                starts_at=datetime.now(timezone.utc),
+                ends_at=datetime.now(timezone.utc) + timedelta(hours=1),
+                status="confirmed",
+                note="PDF download test"
+            )
+            db.add(booking)
+            db.commit()
+            booking_id = booking.id
+
+        # Upload PDF to the booking
+        response = client_instance.post(
+            f"/admin/classes/{booking_id}/attachments",
+            headers=auth_admin,
+            data={"title": "Test PDF"},
+            files={"file": ("test.pdf", b"%PDF-1.4\ntest-pdf-content", "application/pdf")},
+        )
+        assert response.status_code == 200, response.text
+        material_id = response.json()["materials"][0]["id"]
+
+        # Student should be able to download it
+        response = client_instance.get(
+            f"/materials/{material_id}/content",
+            headers=auth_student,
+            params={"download": "true"}
+        )
+        assert response.status_code == 200, f"Student should be able to download PDF: {response.text}"
+        assert response.content == b"%PDF-1.4\ntest-pdf-content"
+
+    def test_video_class_attachment_denies_student_download(self, client, ids):
+        """Test that a student cannot download a video class attachment."""
+        from datetime import datetime, timedelta, timezone
+        client_instance = client["client"]
+        auth_admin = _auth(ids["Admin"])
+        auth_student = _auth(ids["Viewer"])
+
+        # Create a confirmed booking
+        with SESSIONS() as db:
+            booking = models.Booking(
+                user_id=ids["Viewer"],
+                starts_at=datetime.now(timezone.utc),
+                ends_at=datetime.now(timezone.utc) + timedelta(hours=1),
+                status="confirmed",
+                note="Video attachment test"
+            )
+            db.add(booking)
+            db.commit()
+            booking_id = booking.id
+
+        # Upload video to the booking
+        response = client_instance.post(
+            f"/admin/classes/{booking_id}/attachments",
+            headers=auth_admin,
+            data={"title": "Test Video"},
+            files={"file": ("test.mp4", b"fake-video-content", "video/mp4")},
+        )
+        assert response.status_code == 200, response.text
+        result = response.json()
+        material = result["materials"][0]
+        assert material["kind"] == "video"
+        assert material["can_download"] is False
+        material_id = material["id"]
+
+        # Student should NOT be able to download it
+        response = client_instance.get(
+            f"/materials/{material_id}/content",
+            headers=auth_student,
+            params={"download": "true"}
+        )
+        assert response.status_code == 403, "Student should not be able to download video class attachment"
+
+    def test_pdf_via_attach_material_grants_download(self, client, ids):
+        """Test POST /admin/classes/{id}/materials with PDF sets can_download=True."""
+        from datetime import datetime, timedelta, timezone
+        client_instance = client["client"]
+        auth_admin = _auth(ids["Admin"])
+
+        # Create folder and upload a PDF material
+        folder_id = _get_or_create_folder(client, ids, "PDF Materials")
+        material_id = _upload_material(client, ids, title="Shared PDF", folder_id=folder_id, auth=auth_admin)
+
+        # Create a confirmed booking
+        with SESSIONS() as db:
+            booking = models.Booking(
+                user_id=ids["Viewer"],
+                starts_at=datetime.now(timezone.utc),
+                ends_at=datetime.now(timezone.utc) + timedelta(hours=1),
+                status="confirmed",
+                note="Material attachment test"
+            )
+            db.add(booking)
+            db.commit()
+            booking_id = booking.id
+
+        # Attach the PDF material to the booking
+        response = client_instance.post(
+            f"/admin/classes/{booking_id}/materials",
+            headers=auth_admin,
+            json={"material_id": material_id}
+        )
+        assert response.status_code == 200, response.text
+        result = response.json()
+
+        # Verify can_download is True in materials list
+        assert len(result["materials"]) == 1
+        material = result["materials"][0]
+        assert material["kind"] == "pdf"
+        assert material["can_download"] is True
+
+        # Verify AccessGrant has can_download=True in database
+        with SESSIONS() as db:
+            grant = db.scalar(
+                select(models.AccessGrant).where(
+                    models.AccessGrant.user_id == ids["Viewer"],
+                    models.AccessGrant.material_id == material_id
+                )
+            )
+            assert grant is not None, "AccessGrant should exist"
+            assert grant.can_download is True, "PDF attachment via attach_material should have can_download=True"
+
+    def test_upgrading_grant_does_not_downgrade_download(self, client, ids):
+        """Test that re-attaching a PDF doesn't downgrade can_download (upgrade-only pattern)."""
+        from datetime import datetime, timedelta, timezone
+        client_instance = client["client"]
+        auth_admin = _auth(ids["Admin"])
+
+        # Create folder and upload a PDF material
+        folder_id = _get_or_create_folder(client, ids, "Upgrade Test")
+        material_id = _upload_material(client, ids, title="Upgrade PDF", folder_id=folder_id, auth=auth_admin)
+
+        # Create a confirmed booking
+        with SESSIONS() as db:
+            booking = models.Booking(
+                user_id=ids["Viewer"],
+                starts_at=datetime.now(timezone.utc),
+                ends_at=datetime.now(timezone.utc) + timedelta(hours=1),
+                status="confirmed",
+                note="Upgrade test"
+            )
+            db.add(booking)
+            db.commit()
+            booking_id = booking.id
+
+        # Attach the PDF material the first time
+        response = client_instance.post(
+            f"/admin/classes/{booking_id}/materials",
+            headers=auth_admin,
+            json={"material_id": material_id}
+        )
+        assert response.status_code == 200, response.text
+
+        # Verify AccessGrant has can_download=True
+        with SESSIONS() as db:
+            grant = db.scalar(
+                select(models.AccessGrant).where(
+                    models.AccessGrant.user_id == ids["Viewer"],
+                    models.AccessGrant.material_id == material_id
+                )
+            )
+            assert grant.can_download is True
+
+        # Remove the material link to test re-attachment
+        with SESSIONS() as db:
+            link = db.scalar(
+                select(models.BookingMaterial).where(
+                    models.BookingMaterial.booking_id == booking_id,
+                    models.BookingMaterial.material_id == material_id
+                )
+            )
+            if link:
+                db.delete(link)
+                db.commit()
+
+        # Attach again - should maintain can_download=True
+        response = client_instance.post(
+            f"/admin/classes/{booking_id}/materials",
+            headers=auth_admin,
+            json={"material_id": material_id}
+        )
+        assert response.status_code == 200, response.text
+
+        # Verify AccessGrant still has can_download=True
+        with SESSIONS() as db:
+            grant = db.scalar(
+                select(models.AccessGrant).where(
+                    models.AccessGrant.user_id == ids["Viewer"],
+                    models.AccessGrant.material_id == material_id
+                )
+            )
+            assert grant.can_download is True, "can_download should remain True on re-attachment"
+
+    def test_migration_fixes_existing_pdf_attachments(self, client, ids):
+        """Test that ensure_pdf_attachment_download_permission() fixes existing grants."""
+        from datetime import datetime, timedelta, timezone
+        from app.main import ensure_pdf_attachment_download_permission
+
+        # Create a PDF class attachment manually with can_download=False
+        with SESSIONS() as db:
+            folder = models.Folder(name="Migration Test")
+            db.add(folder)
+            db.flush()
+
+            material = models.Material(
+                title="Old PDF Attachment",
+                folder_id=folder.id,
+                kind="pdf",
+                filename="old.pdf",
+                storage_key="old-pdf-key",
+                content_type="application/pdf",
+                size_bytes=100,
+                is_class_attachment=True
+            )
+            db.add(material)
+            db.flush()
+
+            # Create a grant with can_download=False (the broken state)
+            grant = models.AccessGrant(
+                user_id=ids["Viewer"],
+                material_id=material.id,
+                starts_at=datetime.now(timezone.utc),
+                expires_at=datetime.now(timezone.utc) + timedelta(days=365),
+                can_download=False  # Broken state before the fix
+            )
+            db.add(grant)
+            db.commit()
+            grant_id = grant.id
+
+        # Run the migration
+        ensure_pdf_attachment_download_permission()
+
+        # Verify the grant was fixed
+        with SESSIONS() as db:
+            grant = db.get(models.AccessGrant, grant_id)
+            assert grant.can_download is True, "Migration should fix PDF attachment grants"
+
+    def test_class_data_includes_can_download_field(self, client, ids):
+        """Test that class_data() response includes can_download field for each material."""
+        from datetime import datetime, timedelta, timezone
+        client_instance = client["client"]
+        auth_admin = _auth(ids["Admin"])
+
+        # Create a confirmed booking
+        with SESSIONS() as db:
+            booking = models.Booking(
+                user_id=ids["Viewer"],
+                starts_at=datetime.now(timezone.utc),
+                ends_at=datetime.now(timezone.utc) + timedelta(hours=1),
+                status="confirmed",
+                note="class_data test"
+            )
+            db.add(booking)
+            db.commit()
+            booking_id = booking.id
+
+        # Upload a PDF
+        response = client_instance.post(
+            f"/admin/classes/{booking_id}/attachments",
+            headers=auth_admin,
+            data={"title": "Test PDF"},
+            files={"file": ("test.pdf", b"%PDF-1.4\ntest", "application/pdf")},
+        )
+        assert response.status_code == 200, response.text
+        result = response.json()
+
+        # Upload a video
+        response = client_instance.post(
+            f"/admin/classes/{booking_id}/attachments",
+            headers=auth_admin,
+            data={"title": "Test Video"},
+            files={"file": ("test.mp4", b"fake-video", "video/mp4")},
+        )
+        assert response.status_code == 200, response.text
+        result = response.json()
+
+        # Verify both materials have can_download field set correctly
+        assert len(result["materials"]) == 2
+        pdf_material = next((m for m in result["materials"] if m["kind"] == "pdf"), None)
+        video_material = next((m for m in result["materials"] if m["kind"] == "video"), None)
+
+        assert pdf_material is not None, "PDF material should exist"
+        assert video_material is not None, "Video material should exist"
+        assert "can_download" in pdf_material, "can_download field should exist for PDF"
+        assert "can_download" in video_material, "can_download field should exist for video"
+        assert pdf_material["can_download"] is True, "PDF should have can_download=True"
+        assert video_material["can_download"] is False, "Video should have can_download=False"
