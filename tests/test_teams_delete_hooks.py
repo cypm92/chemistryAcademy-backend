@@ -146,7 +146,8 @@ def test_api_startup_runs_application_schema_first(monkeypatch):
     for name in ('ensure_booking_management_column', 'ensure_notification_lease_column', 'ensure_public_resource_columns',
                  'ensure_user_avatar_columns', 'ensure_booking_history_column', 'ensure_guest_booking_columns',
                  'ensure_booking_comment_column', 'ensure_class_attachment_column', 'ensure_folder_color_column',
-                 'ensure_app_setting_text_column', 'ensure_default_theme', 'seed_admin', 'ensure_default_folder'):
+                 'ensure_app_setting_text_column', 'ensure_default_theme', 'seed_admin', 'ensure_default_folder',
+                 'ensure_pdf_attachment_download_permission'):
         monkeypatch.setattr(main, name, lambda: called.append('other'))
     async def startup():
         async with main.lifespan(main.app):
