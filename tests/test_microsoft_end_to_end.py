@@ -98,7 +98,7 @@ def scenario(engine, monkeypatch):
             state = parse_qs(urlparse(started.json()['authorization_url']).query)['state'][0]
             nonce = client.cookies.get('microsoft_oauth_nonce')
             result = client.get('/integrations/microsoft/callback', params={'state': state, 'code': 'fake-code'}, headers={'Cookie': 'microsoft_oauth_nonce=' + nonce})
-            assert result.headers['location'] == '/admin?microsoft=connected'
+            assert result.headers['location'] == '/profile?microsoft=connected'
             assert client.get('/admin/integrations/microsoft', headers=auth(admin_id)).json()['connected']
             monkeypatch.setattr(worker.httpx, 'Client', lambda **kwargs: real_client(transport=transport, **kwargs))
             yield sessions, client, auth(admin_id), auth(student_id), calls, throttle, join_url, events

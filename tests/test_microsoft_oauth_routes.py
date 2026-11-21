@@ -33,6 +33,12 @@ def test_public_proxy_callback_config_and_cookie(monkeypatch):
     assert 'Path=/api/integrations/microsoft/callback' in routes.finish(path='/api/integrations/microsoft/callback').headers['set-cookie']
 
 
+def test_callback_redirects_to_profile():
+    from app.microsoft_oauth_routes import finish
+    assert finish(success=True).headers['location'] == '/profile?microsoft=connected'
+    assert finish(success=False).headers['location'] == '/profile?microsoft=error'
+
+
 def test_calendar_scope_is_requested():
     from app.microsoft_oauth_routes import SCOPES
     assert 'Calendars.ReadWrite' in SCOPES.split()
@@ -89,9 +95,9 @@ def test_flow_and_replay(monkeypatch, postgres_test_db):
     other_state = parse_qs(urlparse(simultaneous.json()['authorization_url']).query)['state'][0]
     result = browser.get('/integrations/microsoft/callback', params={'state': state, 'code': 'fake-code'})
     stale = other.get('/integrations/microsoft/callback', params={'state': other_state, 'code': 'fake-code'})
-    assert stale.headers['location'] == '/admin?microsoft=error'
+    assert stale.headers['location'] == '/profile?microsoft=error'
     calls[:] = calls[:2]
-    assert result.status_code == 303 and result.headers['location'] == '/admin?microsoft=connected'
+    assert result.status_code == 303 and result.headers['location'] == '/profile?microsoft=connected'
     token_form = parse_qs(calls[0].content.decode())
     challenge = base64.urlsafe_b64encode(hashlib.sha256(token_form['code_verifier'][0].encode()).digest()).rstrip(b'=').decode()
     assert challenge == query['code_challenge'][0]
@@ -107,22 +113,22 @@ def test_flow_and_replay(monkeypatch, postgres_test_db):
     identity[0] = '44444444-4444-4444-8444-444444444444'
     state = parse_qs(urlparse(browser.post('/admin/integrations/microsoft/start').json()['authorization_url']).query)['state'][0]
     rejected = browser.get('/integrations/microsoft/callback', params={'state': state, 'code': 'fake-code'})
-    assert rejected.headers['location'] == '/admin?microsoft=error'
+    assert rejected.headers['location'] == '/profile?microsoft=error'
     with factory() as db:
         assert db.get(MicrosoftCredential, 1) is None
     identity[0] = '33333333-3333-4333-8333-333333333333'
     monkeypatch.setenv('MICROSOFT_TENANT_ID', '55555555-5555-4555-8555-555555555555')
     state = parse_qs(urlparse(browser.post('/admin/integrations/microsoft/start').json()['authorization_url']).query)['state'][0]
-    assert browser.get('/integrations/microsoft/callback', params={'state': state, 'code': 'fake-code'}).headers['location'] == '/admin?microsoft=error'
+    assert browser.get('/integrations/microsoft/callback', params={'state': state, 'code': 'fake-code'}).headers['location'] == '/profile?microsoft=error'
     monkeypatch.setenv('MICROSOFT_TENANT_ID', tenant)
     state = parse_qs(urlparse(browser.post('/admin/integrations/microsoft/start').json()['authorization_url']).query)['state'][0]
-    assert browser.get('/integrations/microsoft/callback', params={'state': state, 'code': 'fake-code'}).headers['location'] == '/admin?microsoft=connected'
+    assert browser.get('/integrations/microsoft/callback', params={'state': state, 'code': 'fake-code'}).headers['location'] == '/profile?microsoft=connected'
     assert browser.post('/admin/integrations/microsoft/disconnect').status_code == 200
     calls.clear()
 
     state = parse_qs(urlparse(browser.post('/admin/integrations/microsoft/start').json()['authorization_url']).query)['state'][0]
     cancelled = browser.get('/integrations/microsoft/callback', params={'state': state, 'error': 'access_denied', 'error_description': 'secret details'})
-    assert cancelled.headers['location'] == '/admin?microsoft=error'
+    assert cancelled.headers['location'] == '/profile?microsoft=error'
     assert 'secret details' not in str(cancelled.headers)
     assert len(calls) == 0
     state = parse_qs(urlparse(browser.post('/admin/integrations/microsoft/start').json()['authorization_url']).query)['state'][0]
@@ -187,7 +193,7 @@ def test_disconnect_during_callback_prevents_reconnection(monkeypatch, postgres_
     started = browser.post('/admin/integrations/microsoft/start')
     state = parse_qs(urlparse(started.json()['authorization_url']).query)['state'][0]
     result = browser.get('/integrations/microsoft/callback', params={'state':state, 'code':'fake'})
-    assert result.headers['location'] == '/admin?microsoft=error'
+    assert result.headers['location'] == '/profile?microsoft=error'
     with factory() as db:
         assert db.get(MicrosoftCredential, 1) is None
 
@@ -236,7 +242,7 @@ def test_postgres_callback_fences_inflight_refresh(monkeypatch, postgres_test_db
             return parse_qs(urlparse(response.json()['authorization_url']).query)['state'][0]
         def finish(state):
             return browser.get('/integrations/microsoft/callback', params={'state': state, 'code': 'fake'})
-        assert finish(begin()).headers['location'] == '/admin?microsoft=connected'
+        assert finish(begin()).headers['location'] == '/profile?microsoft=connected'
         state = begin()
         entered = threading.Event()
         def refresh_handler(request):
@@ -256,7 +262,7 @@ def test_postgres_callback_fences_inflight_refresh(monkeypatch, postgres_test_db
                     generation = leased.refresh_generation
                     assert leased.refresh_lease_id and leased.refresh_lease_expires_at
                 result = pool.submit(finish, state).result(timeout=5)
-                assert result.headers['location'] == '/admin?microsoft=connected'
+                assert result.headers['location'] == '/profile?microsoft=connected'
                 with factory() as db:
                     row = db.get(MicrosoftCredential, 1)
                     assert row.refresh_generation == generation + 1

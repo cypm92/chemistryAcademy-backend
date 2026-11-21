@@ -89,7 +89,7 @@ def start(admin=Depends(admin_user), factory=Depends(get_session_factory)):
     return response
 
 def finish(success=False, secure=True, path='/integrations/microsoft/callback'):
-    response = RedirectResponse('/admin?microsoft=' + ('connected' if success else 'error'), status_code=303, headers=HEADERS)
+    response = RedirectResponse('/profile?microsoft=' + ('connected' if success else 'error'), status_code=303, headers=HEADERS)
     response.delete_cookie(COOKIE, path=path, secure=secure, httponly=True, samesite='lax')
     return response
 
