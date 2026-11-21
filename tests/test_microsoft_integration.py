@@ -87,7 +87,7 @@ def test_full_app_oauth_flow_and_permissions(monkeypatch, postgres_test_db):
         nonce = browser.cookies.get("microsoft_oauth_nonce")
         # nginx strips /api before forwarding; the browser sends its public-path cookie.
         result = browser.get("/integrations/microsoft/callback", params={"state": state, "code": "fake-code"}, headers={"Cookie": "microsoft_oauth_nonce=" + nonce})
-        assert result.headers["location"] == "/admin?microsoft=connected"
+        assert result.headers["location"] == "/profile?microsoft=connected"
         assert len(calls) == 2
         with factory() as db:
             assert "fake-refresh" not in db.get(MicrosoftCredential, 1).refresh_token_ciphertext
